@@ -1,11 +1,15 @@
 name: Build Docker Image
 
+# 触发逻辑说明（默认停用自动触发，仅保留手动触发）：
+#   平时：workflow_dispatch 生效，可在 GitHub Actions 页面手动运行。
+#   启用自动触发：删除下方 push / pull_request 前的注释符号即可恢复。
 on:
-  push:
-    branches: [ master ]
-    tags: [ 'v*' ]
-  pull_request:
-    branches: [ master ]
+  # push:
+  #   branches: [ master ]
+  #   tags: [ 'v*' ]
+  # pull_request:
+  #   branches: [ master ]
+  workflow_dispatch:
 
 jobs:
   build-binaries:
@@ -77,6 +81,9 @@ jobs:
   build-and-push-images:
     needs: [build-binaries, build-frontend]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         arch: [amd64, arm64]
@@ -105,8 +112,8 @@ jobs:
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
-        username: Charmillionaire
-        password: ${{ secrets.GHCR_TOKEN }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Extract metadata
       id: meta
@@ -143,8 +150,8 @@ jobs:
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
-        username: Charmillionaire
-        password: ${{ secrets.GHCR_TOKEN }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Extract metadata
       id: meta

@@ -1,0 +1,177 @@
+name: Build Backend Binaries
+
+# 后端（Rust）代码变更时，交叉编译双架构 musl 静态二进制，
+# 并发布到滚动 Release tag `backend-latest`，供 FPK 打包工程稳定下载。
+#
+# 与 build.yml 的分工：
+#   - build.yml         : 构建并推送 Docker 镜像到 ghcr.io（账号/token 已绑定本仓库）
+#   - build-backend.yml : 本工作流，只产出静态二进制并发布到稳定 Release
+#
+# 稳定下载地址（与 commit/分支无关，永远指向最近一次成功构建）：
+#   https://github.com/<owner>/<repo>/releases/download/backend-latest/xread-amd64
+#   https://github.com/<owner>/<repo>/releases/download/backend-latest/xread-arm64
+#   https://github.com/<owner>/<repo>/releases/download/backend-latest/SHA256SUMS
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'build.rs'
+      - '.github/workflows/build-backend.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: backend-binaries
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }} (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            expect: x86-64
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            expect: aarch64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross (musl cross-compiler in Docker)
+        uses: taiki-e/install-action@cross
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Collect and verify binary
+        env:
+          ARCH: ${{ matrix.arch }}
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-bin
+          src="target/${{ matrix.target }}/release/xread"
+          dst="dist-bin/xread-${ARCH}"
+          cp "$src" "$dst"
+          chmod +x "$dst"
+          echo "--- file: $dst ---"
+          file "$dst"
+          file "$dst" | grep -q 'ELF 64-bit'  || { echo "ERROR: 不是 64 位 ELF"; exit 1; }
+          file "$dst" | grep -q "$EXPECT"     || { echo "ERROR: 架构不匹配，期望 $EXPECT"; exit 1; }
+          file "$dst" | grep -q 'static'      || { echo "ERROR: 不是静态链接（musl）"; exit 1; }
+          sha256sum "$dst" > "dist-bin/xread-${ARCH}.sha256"
+          echo "--- sha256 ---"
+          cat "dist-bin/xread-${ARCH}.sha256"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xread-${{ matrix.arch }}
+          path: |
+            dist-bin/xread-${{ matrix.arch }}
+            dist-bin/xread-${{ matrix.arch }}.sha256
+          retention-days: 30
+
+  publish:
+    name: Publish rolling release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-bin
+          merge-multiple: true
+
+      - name: Verify binaries and build checksums
+        run: |
+          set -euo pipefail
+          echo "--- 产物清单 ---"
+          ls -lh dist-bin/
+          for arch in amd64 arm64; do
+            f="dist-bin/xread-${arch}"
+            [ -f "$f" ] || { echo "ERROR: 缺少 $f"; exit 1; }
+            file "$f" | grep -q 'ELF 64-bit' || { echo "ERROR: $f 不是 64 位 ELF"; exit 1; }
+            file "$f" | grep -q 'static'     || { echo "ERROR: $f 不是静态链接"; exit 1; }
+          done
+          (cd dist-bin && sha256sum xread-amd64 xread-arm64 > SHA256SUMS)
+          echo "--- SHA256SUMS ---"
+          cat dist-bin/SHA256SUMS
+
+      - name: Generate release notes
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          CARGO_VER="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          {
+            echo "## 后端预编译二进制（自动构建）"
+            echo
+            echo "- 源码提交：\`${SHA}\`"
+            echo "- 触发分支：${REF}"
+            echo "- Cargo 版本：${CARGO_VER}"
+            echo "- 构建时间：$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "- 构建日志：${RUN_URL}"
+            echo
+            echo "两个目标均为 musl 静态链接：\`x86_64-unknown-linux-musl\`（amd64）、\`aarch64-unknown-linux-musl\`（arm64）。"
+            echo
+            echo "### 稳定下载地址（永远指向最近一次成功构建）"
+            echo "- \`releases/download/backend-latest/xread-amd64\`"
+            echo "- \`releases/download/backend-latest/xread-arm64\`"
+            echo "- \`releases/download/backend-latest/SHA256SUMS\`"
+            echo
+            echo "### 校验值"
+            echo '```'
+            cat dist-bin/SHA256SUMS
+            echo '```'
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Publish to rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG=backend-latest
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "更新已有 Release: $TAG"
+            gh release upload "$TAG" \
+              dist-bin/xread-amd64 dist-bin/xread-arm64 dist-bin/SHA256SUMS \
+              --clobber
+            gh release edit "$TAG" \
+              --title "Backend binaries (rolling)" \
+              --notes-file release-notes.md
+          else
+            echo "创建新 Release: $TAG"
+            gh release create "$TAG" \
+              dist-bin/xread-amd64 dist-bin/xread-arm64 dist-bin/SHA256SUMS \
+              --title "Backend binaries (rolling)" \
+              --notes-file release-notes.md
+          fi
+          echo "已发布: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${TAG}"
