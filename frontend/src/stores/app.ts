@@ -161,6 +161,34 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  // ─── Search: Exact Match ───
+  // 全局「精确匹配」开关：开启后搜索结果只保留书名（或作者）与关键词完全一致的书籍。
+  // 设置存于 localStorage，跨会话保留。
+  const exactMatch = ref(localStorage.getItem('xread-exact-match') === 'true')
+
+  function setExactMatch(value: boolean) {
+    exactMatch.value = value
+    localStorage.setItem('xread-exact-match', value ? 'true' : 'false')
+  }
+
+  function toggleExactMatch() {
+    setExactMatch(!exactMatch.value)
+  }
+
+  // ─── Search: Default All Sources ───
+  // 全局「全部书源」开关：开启后，发起搜索时默认使用「全部书源」范围，
+  // 而非默认的单个书源。设置存于 localStorage，跨会话保留。
+  const searchAllByDefault = ref(localStorage.getItem('xread-search-all-default') === 'true')
+
+  function setSearchAllByDefault(value: boolean) {
+    searchAllByDefault.value = value
+    localStorage.setItem('xread-search-all-default', value ? 'true' : 'false')
+  }
+
+  function toggleSearchAllByDefault() {
+    setSearchAllByDefault(!searchAllByDefault.value)
+  }
+
   // ─── UI State ───
   const showLoginModal = ref(false)
   const showSettingsDrawer = ref(false)
@@ -168,6 +196,15 @@ export const useAppStore = defineStore('app', () => {
   const showUserManager = ref(false)
   const showWebdavManager = ref(false)
   const showGroupManager = ref(false)
+  const showSearchManage = ref(false)
+  const showExploreManage = ref(false)
+  const showSourceCompatibility = ref(false)
+  // 书源数据版本号：兼容检测深度测试把结论写回 bookSourceGroup 后自增，
+  // 书源管理页监听它自动重新拉库，无需用户手动点「刷新书源」。
+  const sourceGroupVersion = ref(0)
+  function bumpSourceGroupVersion() {
+    sourceGroupVersion.value += 1
+  }
   const isOnline = ref(typeof navigator !== 'undefined' ? navigator.onLine : true)
   const pwaReady = ref(false)
   const pwaUpdateAvailable = ref(false)
@@ -288,11 +325,14 @@ export const useAppStore = defineStore('app', () => {
 
   return {
     theme, setTheme, toggleTheme,
+    exactMatch, setExactMatch, toggleExactMatch,
+    searchAllByDefault, setSearchAllByDefault, toggleSearchAllByDefault,
     userInfo, isSecureMode, needSecureKey, secureKeyRequired, adminAuthorized, publicRead,
     canManageBookSources, secureKey, isLoggedIn,
     versionUpdate, versionUpdateLoading, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
     fetchUserInfo, setUser, clearUser, setSecureKey, updateUserInfo, checkVersionUpdate, dismissVersionUpdateReminder,
-    showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager, showGroupManager,
+    showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager, showGroupManager, showSearchManage, showExploreManage, showSourceCompatibility,
+    sourceGroupVersion, bumpSourceGroupVersion,
     isOnline, pwaReady, pwaUpdateAvailable, deferredInstallPrompt, waitingServiceWorker,
     setOnlineStatus, setPwaReady, setPwaUpdateAvailable, setDeferredInstallPrompt, setWaitingServiceWorker, installPwa, applyPwaUpdate,
     readingStats, readingStatsSummary, startReadingSession, stopReadingSession, markBookOpened, markChapterRead,

@@ -8,7 +8,7 @@
           搜索中...
         </span>
         <span v-else class="result-count">
-          ({{ displayResults.length }} 个结果<template v-if="exactMatchCount > 0">，{{ exactMatchCount }} 个匹配</template>)
+          ({{ displayResults.length }} 个结果<template v-if="!appStore.exactMatch && exactMatchCount > 0">，{{ exactMatchCount }} 个匹配</template><template v-else-if="appStore.exactMatch">，已精确匹配</template>)
         </span>
       </h2>
       <button class="back-btn" @click="$emit('back')">
@@ -145,7 +145,7 @@ const sourceOptions = computed(() => {
 })
 
 const displayResults = computed<SearchBook[]>(() => {
-  return results.value.map((book) => {
+  let list = results.value.map((book) => {
     const source = sourceByUrl.value.get(book.origin)
     return {
       ...book,
@@ -153,6 +153,21 @@ const displayResults = computed<SearchBook[]>(() => {
       originGroup: book.originGroup || source?.bookSourceGroup,
     }
   })
+
+  // 精确匹配：仅保留书名（或作者）与关键词完全一致（忽略大小写与首尾空白）的条目。
+  // 开关为全局设置（stores/app 的 exactMatch），在「设置 → 搜索管理」中控制。
+  if (appStore.exactMatch) {
+    const keyword = plainKeyword(searchKey.value || '').toLowerCase()
+    if (keyword) {
+      list = list.filter((book) => {
+        const name = (book.name || '').trim().toLowerCase()
+        const author = (book.author || '').trim().toLowerCase()
+        return name === keyword || author === keyword
+      })
+    }
+  }
+
+  return list
 })
 
 /** 去掉搜索模式前缀（x:/m:/t:/d:），得到用户真正输入的关键词。 */

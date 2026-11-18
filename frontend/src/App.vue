@@ -11,6 +11,9 @@
     <UserManager v-model="appStore.showUserManager" />
     <WebdavManager v-model="appStore.showWebdavManager" />
     <GroupManagerModal v-model="appStore.showGroupManager" />
+    <SearchManageDialog v-model="appStore.showSearchManage" />
+    <ExploreManageDialog v-model="appStore.showExploreManage" />
+    <SourceCompatibilityDialog v-model="appStore.showSourceCompatibility" />
 
     <!-- Toast notifications -->
     <div class="toast-container">
@@ -40,6 +43,9 @@ import SourceManager from './components/SourceManager.vue'
 import UserManager from './components/UserManager.vue'
 import WebdavManager from './components/WebdavManager.vue'
 import GroupManagerModal from './components/bookshelf/GroupManagerModal.vue'
+import SearchManageDialog from './components/SearchManageDialog.vue'
+import ExploreManageDialog from './components/ExploreManageDialog.vue'
+import SourceCompatibilityDialog from './components/SourceCompatibilityDialog.vue'
 import { applyCustomUiTheme, loadCustomUiTheme } from './utils/themeCustom'
 
 const route = useRoute()

@@ -64,48 +64,6 @@
             </button>
           </section>
 
-          <section class="drawer-section">
-            <h3 class="section-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
-              </svg>
-              书源管理
-            </h3>
-            <div v-if="!appStore.canManageBookSources" class="status-card">
-              <span>公开只读模式</span>
-              <small>书源由管理员统一配置，需登录账号后修改。</small>
-            </div>
-            <div class="btn-group">
-              <button class="action-btn" :disabled="!appStore.canManageBookSources" @click="openSourceManager">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                  <path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-                </svg>
-                书源管理
-              </button>
-            </div>
-          </section>
-
-          <section v-if="appStore.userInfo?.isAdmin || appStore.adminAuthorized" class="drawer-section">
-            <h3 class="section-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-                <circle cx="9" cy="7" r="4" />
-                <path d="M19 8v6" />
-                <path d="M22 11h-6" />
-              </svg>
-              用户管理
-            </h3>
-            <div class="status-card">
-              <span>当前账号拥有管理员权限</span>
-              <small>支持新增用户、重置密码、删除用户和调整权限。</small>
-            </div>
-            <div class="btn-group">
-              <button class="action-btn" @click="openUserManager">
-                用户管理
-              </button>
-            </div>
-          </section>
-
           <section v-if="appStore.isLoggedIn" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
@@ -114,6 +72,16 @@
               书架管理
             </h3>
             <div class="btn-group vertical-grid">
+              <button class="action-btn" @click="goToBookshelf">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20" />
+                  <path d="M4 5.5V19a2 2 0 0 0 2 2h14" />
+                  <path d="M8 7h8" />
+                  <path d="M8 11h8" />
+                  <path d="M8 15h5" />
+                </svg>
+                书架
+              </button>
               <button class="action-btn" :disabled="localBookUploading" @click="triggerImportBook">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                   <path d="M12 3v12" />
@@ -144,6 +112,70 @@
                   <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
                 </svg>
                 编辑
+              </button>
+            </div>
+          </section>
+
+          <section class="drawer-section">
+            <h3 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
+              </svg>
+              书源管理
+            </h3>
+            <div v-if="!appStore.canManageBookSources" class="status-card">
+              <span>公开只读模式</span>
+              <small>书源由管理员统一配置，需登录账号后修改。</small>
+            </div>
+            <div class="btn-group">
+              <button class="action-btn" :disabled="!appStore.canManageBookSources" @click="openSourceManager">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                </svg>
+                书源
+              </button>
+              <button class="action-btn" @click="openCompatibility">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <path d="M9 11l3 3L22 4" />
+                  <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                </svg>
+                检测
+              </button>
+              <button class="action-btn" @click="openSearchManage">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <circle cx="11" cy="11" r="8" />
+                  <path d="m21 21-4.3-4.3" />
+                  <path d="M11 8v6M8 11h6" />
+                </svg>
+                搜索
+              </button>
+              <button class="action-btn" @click="openExploreManage">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <path d="M12 3a9 9 0 1 0 9 9" />
+                  <path d="m16.24 7.76-2.12 6.36-6.36 2.12 2.12-6.36 6.36-2.12z" />
+                </svg>
+                发现
+              </button>
+            </div>
+          </section>
+
+          <section v-if="appStore.userInfo?.isAdmin || appStore.adminAuthorized" class="drawer-section">
+            <h3 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M19 8v6" />
+                <path d="M22 11h-6" />
+              </svg>
+              用户管理
+            </h3>
+            <div class="status-card">
+              <span>当前账号拥有管理员权限</span>
+              <small>支持新增用户、重置密码、删除用户和调整权限。</small>
+            </div>
+            <div class="btn-group">
+              <button class="action-btn" @click="openUserManager">
+                用户管理
               </button>
             </div>
           </section>
@@ -368,6 +400,21 @@ function close() {
   emit('update:modelValue', false)
 }
 
+function openSearchManage() {
+  close()
+  appStore.showSearchManage = true
+}
+
+function openExploreManage() {
+  close()
+  appStore.showExploreManage = true
+}
+
+function openCompatibility() {
+  close()
+  appStore.showSourceCompatibility = true
+}
+
 function handleLogin() {
   close()
   appStore.showLoginModal = true
@@ -459,6 +506,13 @@ function handleOpenRelease() {
 
 async function handleDismissVersionUpdate() {
   await appStore.dismissVersionUpdateReminder()
+}
+
+async function goToBookshelf() {
+  close()
+  if (router.currentRoute.value.path !== '/') {
+    await router.push('/')
+  }
 }
 
 async function triggerImportBook() {

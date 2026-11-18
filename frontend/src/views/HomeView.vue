@@ -414,13 +414,25 @@ async function handleReorderBooks(payload: { draggedUrl: string; targetUrl: stri
 .group-tabs {
   border-bottom: none;
   margin-bottom: var(--space-2);
+  position: relative;
 }
 
 .tabs-scroll {
   display: flex;
-  justify-content: center;
   gap: 0;
+  /* 关键修复：原先 justify-content:center 与 overflow-x:auto 同时存在时，
+     内容超出一屏会被两端裁切、且左端无法滚动到（经典 flex 居中溢出 bug）。
+     改为 width:fit-content + max-width:100% + margin:0 auto：
+     分类少时整体居中，分类多时占满宽度并能在内部完整横向滚动。 */
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto;
   overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  /* 左右两端各 14px 渐隐，提示还有更多分类可滑动 */
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
   scrollbar-width: none;
   -ms-overflow-style: none;
 }

@@ -61,6 +61,15 @@ export function deleteAllBookSources() {
   return http.post<{ deleted: boolean }>('/deleteAllBookSources').then((r) => r.data)
 }
 
+// 书源测试单请求超时（秒）：由飞牛安装向导「运行参数」页配置，cmd/main 启动时
+// 把向导值注入 index.html 的 window.__XREAD_CONFIG__。
+// 配置值优先（1-120s）；未注入或值非法时回退默认 120s，保证独立部署也能正常使用。
+function testSourceTimeoutMs(): number {
+  const cfg = (window as unknown as { __XREAD_CONFIG__?: { testSourceTimeout?: number } }).__XREAD_CONFIG__
+  const secs = Number(cfg?.testSourceTimeout)
+  return Number.isFinite(secs) && secs >= 1 && secs <= 120 ? secs * 1000 : 120000
+}
+
 export function testBookSources(params: {
   bookSourceUrls?: string[]
   keyword?: string
@@ -70,7 +79,7 @@ export function testBookSources(params: {
   if ((params.bookSourceUrls?.length || 0) > MAX_SOURCE_TEST_BATCH_SIZE) {
     throw new Error(`单次最多测试 ${MAX_SOURCE_TEST_BATCH_SIZE} 个书源`)
   }
-  return http.post<BookSourceTestResponse>('/testBookSources', params).then((r) => r.data)
+  return http.post<BookSourceTestResponse>('/testBookSources', params, { timeout: testSourceTimeoutMs() }).then((r) => r.data)
 }
 
 export function deleteInvalidBookSources() {

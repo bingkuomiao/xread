@@ -1,48 +1,63 @@
 <template>
-  <section class="filter-bar">
-    <label class="bulk-check" :class="{ muted: !hasSources }">
-      <input
-        type="checkbox"
-        :checked="allSelected"
-        :disabled="!hasSources"
-        :aria-checked="partiallySelected ? 'mixed' : allSelected"
-        @change="$emit('toggle-current-selection')"
-      />
-      <span>{{ allSelected ? '取消全选' : '全选当前' }}</span>
-    </label>
-    <div class="search-field">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-        <circle cx="11" cy="11" r="8" />
-        <path d="m21 21-4.3-4.3" />
-      </svg>
-      <input
-        :value="filterText"
-        type="text"
-        placeholder="搜索书源名称或 URL"
-        @input="$emit('update:filterText', ($event.target as HTMLInputElement).value)"
-      />
-    </div>
-    <select
-      :value="filterGroup"
-      class="group-select"
-      @change="$emit('update:filterGroup', ($event.target as HTMLSelectElement).value)"
-    >
-      <option value="">全部分组</option>
-      <option v-for="group in groups" :key="group" :value="group">{{ group }}</option>
-    </select>
-    <div v-if="selectedCount > 0" class="selection-tools">
-      <span>已选 {{ selectedCount }}</span>
-      <button class="mini-btn" type="button" @click="$emit('clear-selection')">清空</button>
-      <button class="mini-btn danger" type="button" @click="$emit('delete-selection')">删除选中</button>
-    </div>
-  </section>
+  <div class="filter-wrap">
+    <section class="filter-bar">
+      <label class="bulk-check" :class="{ muted: !hasSources }">
+        <input
+          type="checkbox"
+          :checked="allSelected"
+          :disabled="!hasSources"
+          :aria-checked="partiallySelected ? 'mixed' : allSelected"
+          @change="$emit('toggle-current-selection')"
+        />
+        <span>{{ allSelected ? '取消全选' : '全选当前' }}</span>
+      </label>
+      <div class="search-field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+          <circle cx="11" cy="11" r="8" />
+          <path d="m21 21-4.3-4.3" />
+        </svg>
+        <input
+          :value="filterText"
+          type="text"
+          placeholder="搜索书源名称或 URL"
+          @input="$emit('update:filterText', ($event.target as HTMLInputElement).value)"
+        />
+      </div>
+      <!-- 原生 <select>：外观由 global.css 的 .native-select 统一定义，
+           与发现管理「切换书源」、发现页筛选下拉共用一套样式；展开后的
+           选项列表由系统渲染（PC 浅色 / iOS 深色带勾选）。
+           标记分组的 <option> 文本自带符号与数量， iOS 系统下拉里同样可见。 -->
+      <select
+        :value="filterGroup"
+        class="native-select group-select"
+        :class="activeTone ? 'group-select-' + activeTone : ''"
+        @change="$emit('update:filterGroup', ($event.target as HTMLSelectElement).value)"
+      >
+        <option value="">全部分组</option>
+        <option
+          v-for="group in groups"
+          :key="group.value"
+          :value="group.value"
+          :class="group.tone ? 'group-option-' + group.tone : ''"
+        >{{ group.label }}</option>
+      </select>
+      <div v-if="selectedCount > 0" class="selection-tools">
+        <span>已选 {{ selectedCount }}</span>
+        <button class="mini-btn" type="button" @click="$emit('clear-selection')">清空</button>
+        <button class="mini-btn danger" type="button" @click="$emit('delete-selection')">删除选中</button>
+      </div>
+    </section>
+  </div>
 </template>
 
 <script setup lang="ts">
-defineProps<{
+import { computed } from 'vue'
+import type { BookSourceGroupOption } from '../../utils/sourceSelection'
+
+const props = defineProps<{
   filterText: string
   filterGroup: string
-  groups: string[]
+  groups: BookSourceGroupOption[]
   allSelected: boolean
   partiallySelected: boolean
   selectedCount: number
@@ -56,14 +71,47 @@ defineEmits<{
   'clear-selection': []
   'delete-selection': []
 }>()
+
+// 选中标记分组时，让闭合态下拉框跟着变色（下拉自身样式，不新增控件）
+const activeTone = computed(
+  () => props.groups.find((g) => g.value === props.filterGroup)?.tone ?? null,
+)
 </script>
 
 <style scoped>
+.filter-wrap {
+  padding: 0;
+}
+
 .filter-bar {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 14px 24px 0;
+}
+
+/* ── 标记分组下拉项：置顶、带图标与数量 ─────────────────────────────
+   <option> 文本自带符号 + 名称 + 数量，iOS 系统渲染时同样可读；
+   PC 浏览器可给 option 上色，这里附加一层，不影响系统渲染的下拉。 */
+.group-option-bad {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+.group-option-warn {
+  color: #b26a00;
+  font-weight: 600;
+}
+
+/* 选中标记分组时，闭合态下拉框跟着变色，一眼可见当前筛选 */
+.group-select-bad {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+  background-color: color-mix(in srgb, var(--color-danger) 8%, var(--color-bg-sunken));
+}
+.group-select-warn {
+  border-color: var(--color-warning);
+  color: #b26a00;
+  background-color: color-mix(in srgb, var(--color-warning) 10%, var(--color-bg-sunken));
 }
 
 .bulk-check {
@@ -111,14 +159,10 @@ defineEmits<{
   outline: none;
 }
 
+/* 闭合态样式全部来自 global.css 的 .native-select（与发现页下拉共用），
+   这里只补一个宽度约束，避免分组名过长时把布局撑开。 */
 .group-select {
-  min-width: 150px;
-  min-height: 40px;
-  padding: 0 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg);
-  color: inherit;
+  max-width: 220px;
 }
 
 .selection-tools {
@@ -168,6 +212,10 @@ defineEmits<{
     align-items: stretch;
     padding-left: 16px;
     padding-right: 16px;
+  }
+
+  .group-select {
+    max-width: none;
   }
 
   .selection-tools {

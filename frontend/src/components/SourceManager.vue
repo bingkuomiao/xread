@@ -14,6 +14,7 @@
             :selected="selectedFilteredSources.length"
             :loading="loading"
             :testing="testingSources"
+            :progress-text="progressText"
             :invalid-count="invalidSources.length"
             @refresh="loadSources"
             @import-local="triggerFileImport"
@@ -164,16 +165,23 @@ import {
   readSourceFile,
 } from '../api/source'
 import { useAppStore } from '../stores/app'
-import type { BookSource } from '../types'
+import type { BookSource, BookSourceTestResponse } from '../types'
 import {
+  dedupeBookSources,
   filterBookSources,
-  getBookSourceGroups,
+  getBookSourceGroupOptions,
   getBookSourceStats,
   getVisibleSelection,
+  SOURCE_GROUP_INVALID,
   toBookSourceDeletePayload,
 } from '../utils/sourceSelection'
 import { appendAuthQueryParams } from '../utils/secureAccess'
-import { chunkBookSourceUrls, mergeBookSourceTestResponses } from '../utils/sourceTesting'
+import {
+  chunkBookSourceUrls,
+  mergeBookSourceTestResponses,
+  runBisectSourceTest,
+  type BisectTestOutcome,
+} from '../utils/sourceTesting'
 import SourceEditorPanel from './source-manager/SourceEditorPanel.vue'
 import SourceFilterBar from './source-manager/SourceFilterBar.vue'
 import SourceList from './source-manager/SourceList.vue'
@@ -200,6 +208,46 @@ const appStore = useAppStore()
 const sources = ref<BookSource[]>([])
 const loading = ref(false)
 const testingSources = ref(false)
+// 导入 / 同步 / 测试过程的动态进度，统一显示在书源管理统计行「当前筛选」后
+const progressActive = ref(false)
+const progressLabel = ref('')
+const progressDone = ref(0)
+const progressTotal = ref(0)
+const progressText = computed(() => {
+  if (!progressActive.value) return ''
+  return progressTotal.value > 0
+    ? `${progressLabel.value} ${progressDone.value}/${progressTotal.value}`
+    : `${progressLabel.value}…`
+})
+
+// 统计行进度标签统一用「…中」，后面跟 X/Y 数字进度（导入中 / 同步中 / 测试中）
+function startProgress(label: string, total = 0) {
+  progressLabel.value = label
+  progressDone.value = 0
+  progressTotal.value = total
+  progressActive.value = true
+}
+function bumpProgress(n: number) {
+  progressDone.value += n
+}
+function endProgress() {
+  progressActive.value = false
+  progressLabel.value = ''
+  progressDone.value = 0
+  progressTotal.value = 0
+}
+
+// 每批数量：拆小批次才能实时反馈进度；后端 /saveBookSources 为批量 upsert，结果不变
+const PROGRESS_BATCH_SIZE = 10
+
+async function saveSourcesWithProgress(list: BookSource[], label: string) {
+  startProgress(label, list.length)
+  for (let i = 0; i < list.length; i += PROGRESS_BATCH_SIZE) {
+    const batch = list.slice(i, i + PROGRESS_BATCH_SIZE)
+    await saveBookSources(batch)
+    bumpProgress(batch.length)
+  }
+}
 const filterText = ref('')
 const filterGroup = ref('')
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -223,7 +271,9 @@ const credentialUsername = ref('')
 const credentialPassword = ref('')
 const pendingLoginSource = ref<BookSource | null>(null)
 
-const groupList = computed(() => getBookSourceGroups(sources.value))
+// 分组下拉改为带「数量 + 置顶 + 标记」的选项：深度测试写回的
+// 「不兼容 / 需留意」永远排在最前，并附带该分组下的书源数量。
+const groupList = computed(() => getBookSourceGroupOptions(sources.value))
 
 const filteredSources = computed(() =>
   filterBookSources(sources.value, filterText.value, filterGroup.value)
@@ -236,7 +286,7 @@ const selectedFilteredSources = computed(() =>
 )
 
 const invalidSources = computed(() =>
-  sources.value.filter((source) => hasSourceGroup(source, '失效'))
+  sources.value.filter((source) => hasSourceGroup(source, SOURCE_GROUP_INVALID))
 )
 
 const allFilteredSelected = computed(() =>
@@ -277,10 +327,25 @@ function persistSubscriptions() {
   localStorage.setItem(SUBSCRIPTION_KEY, JSON.stringify(subscriptions.value))
 }
 
+// 记录最近一次加载对应的书源数据版本，用于弹窗关闭期间发生写回时，
+// 下次打开能识别出数据已过期并重新拉库。
+let lastLoadedVersion = appStore.sourceGroupVersion
+
 async function loadSources() {
   loading.value = true
   try {
-    sources.value = await getBookSources()
+    lastLoadedVersion = appStore.sourceGroupVersion
+    const loaded = await getBookSources()
+    // 加载/刷新时兜底：把库中已存在但 bookSourceGroup 为空的书源补为「🎃缺失」并回写。
+    const fixed = fillMissingGroup(loaded)
+    const changed = fixed.filter(
+      (source, i) => source.bookSourceGroup !== (loaded[i].bookSourceGroup || ''),
+    )
+    if (changed.length) {
+      await saveBookSources(changed)
+      appStore.showToast(`已为 ${changed.length} 个书源补全缺失分组`, 'success')
+    }
+    sources.value = fixed
     pruneSelection()
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')
@@ -336,6 +401,41 @@ async function removeSelectedSources() {
   }
 }
 
+// axios 客户端超时被 http 拦截器转成 Error("timeout of 60000ms exceeded")，
+// 用该专有文案精确识别，避免把后端业务错误（可能含中文「超时」）误判为超时。
+function isTimeoutError(e: unknown): boolean {
+  const msg = (e as Error)?.message || ''
+  return /timeout of \d+ms exceeded|ECONNABORTED/i.test(msg)
+}
+
+// 追加「失效」分组：保留原有分组、英文逗号连接、去重。
+// hasSourceGroup 按 /[,;；、]/ 切分，中文逗号「，」不被识别，故统一用英文逗号。
+function withInvalidGroup(group: string | undefined): string {
+  const parts = (group || '')
+    .split(/[,;；、]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+  if (!parts.includes(SOURCE_GROUP_INVALID)) parts.push(SOURCE_GROUP_INVALID)
+  return parts.join(',')
+}
+
+type BatchTestOutcome = BisectTestOutcome<BookSourceTestResponse>
+
+// 单批测试：交给递归二分编排（utils/sourceTesting.ts）。超时不再只拆一层，
+// 而是拆到单源——只有「单独测试仍超时」的源才标记失效，避免同批正常源被误伤。
+// markInvalid 仍为 true：后端对返回 valid 的源会自动清除「失效」分组，可修复历史误标。
+async function testBatchWithRetry(batch: string[]): Promise<BatchTestOutcome> {
+  return runBisectSourceTest<BookSourceTestResponse>(batch, {
+    request: (urls) =>
+      testBookSources({ bookSourceUrls: urls, markInvalid: true, concurrent: 12 }),
+    isTimeout: isTimeoutError,
+    onSplit: () => {
+      // 细分期间进度数字不动，给个标签反馈，避免看起来又卡死
+      progressLabel.value = '超时细分中'
+    },
+  })
+}
+
 async function testSources() {
   const targets = selectedFilteredSources.value.length ? selectedFilteredSources.value : sources.value
   if (!targets.length) {
@@ -346,31 +446,59 @@ async function testSources() {
   if (!confirm(`将测试${scopeText} 个书源。测试会请求外部站点，耗时可能较长，是否继续？`)) return
 
   testingSources.value = true
+  startProgress('测试中', targets.length)
   try {
-    const batches = chunkBookSourceUrls(targets.map((source) => source.bookSourceUrl))
-    const responses = []
+    // 每批 10 个，便于在统计行实时显示「测试中 X/Y」；后端仍按 12 并发逐批处理
+    const batches = chunkBookSourceUrls(targets.map((source) => source.bookSourceUrl), PROGRESS_BATCH_SIZE)
+    const allResponses: BookSourceTestResponse[] = []
+    const timeoutUrls: string[] = []
+    const untestedUrls: string[] = []
     for (const batch of batches) {
-      responses.push(
-        await testBookSources({
-          bookSourceUrls: batch,
-          markInvalid: true,
-          concurrent: 12,
-        })
-      )
+      progressLabel.value = '测试中'
+      const outcome = await testBatchWithRetry(batch)
+      allResponses.push(...outcome.responses)
+      timeoutUrls.push(...outcome.timeoutUrls)
+      untestedUrls.push(...outcome.untestedUrls)
+      // 成功、超时重试、非超时失败都要推进，避免进度 X/N 卡住不动
+      bumpProgress(batch.length)
     }
-    const result = mergeBookSourceTestResponses(responses)
+
+    // 先拉最新态：后端对成功批次可能已写入分组，避免用旧对象覆盖这些变更
     await loadSources()
-    if (result.invalid > 0) {
-      filterGroup.value = '失效'
+    if (timeoutUrls.length) {
+      try {
+        const timeoutSet = new Set(timeoutUrls)
+        const toMark = sources.value
+          .filter((source) => timeoutSet.has(source.bookSourceUrl))
+          .map((source) => ({ ...source, bookSourceGroup: withInvalidGroup(source.bookSourceGroup) }))
+        if (toMark.length) {
+          await saveBookSources(toMark)
+          await loadSources()
+        }
+      } catch (e: unknown) {
+        appStore.showToast(`超时书源标记失效失败：${(e as Error).message}`, 'error')
+      }
     }
+
+    const result = mergeBookSourceTestResponses(allResponses)
+    if (result.invalid > 0 || timeoutUrls.length > 0) {
+      filterGroup.value = SOURCE_GROUP_INVALID
+    }
+    const parts = [
+      `有效 ${result.valid} 个`,
+      `失效 ${result.invalid} 个`,
+      `超时标记失效 ${timeoutUrls.length} 个`,
+    ]
+    if (untestedUrls.length) parts.push(`未测 ${untestedUrls.length} 个`)
     appStore.showToast(
-      `测试完成：有效 ${result.valid} 个，失效 ${result.invalid} 个，更新分组 ${result.markedInvalid} 个`,
-      result.invalid > 0 ? 'warning' : 'success'
+      `测试完成：${parts.join('，')}`,
+      result.invalid > 0 || timeoutUrls.length > 0 || untestedUrls.length > 0 ? 'warning' : 'success'
     )
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '书源测试失败', 'error')
   } finally {
     testingSources.value = false
+    endProgress()
   }
 }
 
@@ -575,21 +703,40 @@ function triggerFileImport() {
   fileInputRef.value?.click()
 }
 
+// 导入书源时，把 bookSourceGroup 为空的书源自动补为「🎃缺失」，避免空分组不可见。
+function fillMissingGroup(sources: BookSource[]): BookSource[] {
+  return sources.map((source) => {
+    if (!(source.bookSourceGroup || '').trim()) {
+      return { ...source, bookSourceGroup: '🎃缺失' }
+    }
+    return source
+  })
+}
+
 async function handleFileImport(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
+  startProgress('解析书源文件')
   try {
-    const imported = await readSourceFile(file)
+    const imported = fillMissingGroup(await readSourceFile(file))
     if (!imported.length) {
       throw new Error('文件中没有可导入的书源')
     }
-    await saveBookSources(imported)
-    appStore.showToast(`成功导入 ${imported.length} 个书源`, 'success')
+    const { toSave, skipped } = dedupeBookSources(imported, sources.value)
+    if (!toSave.length) {
+      appStore.showToast(`没有可导入的书源（已跳过 ${skipped.length} 个重复）`, 'warning')
+    } else {
+      await saveSourcesWithProgress(toSave, '导入中')
+      const msg = `成功导入 ${toSave.length} 个书源`
+        + (skipped.length ? `，跳过重复 ${skipped.length} 个` : '')
+      appStore.showToast(msg, 'success')
+    }
     await loadSources()
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '导入失败', 'error')
   } finally {
+    endProgress()
     input.value = ''
   }
 }
@@ -599,6 +746,7 @@ async function importRemoteSource() {
     appStore.showToast('请输入远程书源链接', 'warning')
     return
   }
+  startProgress('读取远程书源')
   try {
     const raw = await readRemoteSourceFile(remoteUrl.value)
     const parsed = raw.flatMap((item) => {
@@ -612,12 +760,21 @@ async function importRemoteSource() {
     if (!parsed.length) {
       throw new Error('远程书源文件为空或格式错误')
     }
-    await saveBookSources(parsed)
-    touchSubscription(remoteUrl.value)
-    appStore.showToast(`成功同步 ${parsed.length} 个书源`, 'success')
+    const { toSave, skipped } = dedupeBookSources(fillMissingGroup(parsed), sources.value)
+    if (!toSave.length) {
+      appStore.showToast(`没有可同步的书源（已跳过 ${skipped.length} 个重复）`, 'warning')
+    } else {
+      await saveSourcesWithProgress(toSave, '同步中')
+      touchSubscription(remoteUrl.value)
+      const msg = `成功同步 ${toSave.length} 个书源`
+        + (skipped.length ? `，跳过重复 ${skipped.length} 个` : '')
+      appStore.showToast(msg, 'success')
+    }
     await loadSources()
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '远程同步失败', 'error')
+  } finally {
+    endProgress()
   }
 }
 
@@ -654,13 +811,20 @@ function touchSubscription(url: string) {
 }
 
 function exportSources() {
-  const blob = new Blob([JSON.stringify(sources.value, null, 2)], { type: 'application/json;charset=utf-8' })
+  // 仅导出选中的书源：要导出全部，需先在筛选栏「全选当前」勾选所有书源。
+  const targets = selectedFilteredSources.value
+  if (!targets.length) {
+    appStore.showToast('请先选择要导出的书源', 'warning')
+    return
+  }
+  const blob = new Blob([JSON.stringify(targets, null, 2)], { type: 'application/json;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = `reader-book-sources-${formatDateForFile()}.json`
+  anchor.download = `reader-book-sources-${targets.length}-${formatDateForFile()}.json`
   anchor.click()
   URL.revokeObjectURL(url)
+  appStore.showToast(`已导出选中的 ${targets.length} 个书源`, 'success')
 }
 
 function formatDateForFile() {
@@ -675,7 +839,8 @@ function close() {
 
 watch(() => props.modelValue, (v) => {
   if (v) {
-    if (sources.value.length === 0) {
+    // 首次打开、或兼容检测在关闭期间写回了分组，都重新拉库。
+    if (sources.value.length === 0 || lastLoadedVersion !== appStore.sourceGroupVersion) {
       loadSources()
     }
     if (!editingSource.value && !editorText.value.trim()) {
@@ -683,6 +848,12 @@ watch(() => props.modelValue, (v) => {
     }
   }
 }, { immediate: true })
+
+// 兼容检测深度测试写回 bookSourceGroup 后，书源管理页若正打开则立即刷新，
+// 分组下拉立刻出现「不兼容 / 需留意」两项，无需手动点刷新按钮。
+watch(() => appStore.sourceGroupVersion, () => {
+  if (props.modelValue) loadSources()
+})
 </script>
 
 <style scoped>

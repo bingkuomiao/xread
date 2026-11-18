@@ -4,6 +4,7 @@
       <h2>书源管理</h2>
       <p>
         共 {{ total }} 个 · 启用 {{ enabled }} 个 · 当前筛选 {{ filtered }} 个
+        <span v-if="progressText" class="progress-text"> · {{ progressText }}</span>
         <span v-if="selected > 0"> · 已选 {{ selected }} 个</span>
       </p>
     </div>
@@ -18,7 +19,7 @@
       </button>
       <button class="action-btn" type="button" @click="$emit('import-local')">本地导入</button>
       <button class="action-btn" type="button" @click="$emit('open-subscriptions')">远程同步</button>
-      <button class="action-btn" type="button" @click="$emit('export')">导出</button>
+      <button class="action-btn" type="button" @click="$emit('export')">导出选中</button>
       <button class="action-btn" :disabled="testing || total === 0" type="button" @click="$emit('test-sources')">
         {{ testing ? '测试中...' : '测试书源' }}
       </button>
@@ -48,6 +49,7 @@ defineProps<{
   selected: number
   loading: boolean
   testing: boolean
+  progressText: string
   invalidCount: number
 }>()
 
@@ -88,6 +90,19 @@ defineEmits<{
   margin-top: 6px;
   font-size: 13px;
   color: var(--color-text-tertiary);
+}
+
+.title-block .progress-text {
+  color: var(--color-primary);
+  font-weight: 600;
+  /* 等宽数字，进度跳变时文字不左右抖动 */
+  font-variant-numeric: tabular-nums;
+  animation: progress-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 
 .header-actions {

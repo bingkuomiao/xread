@@ -57,3 +57,49 @@ export function updateUser(
 export function deleteUsers(usernames: string[]) {
   return http.post<UserInfo[]>('/deleteUsers', usernames).then((r) => r.data)
 }
+
+// ─── 用户配置（服务端持久化，用于跨设备同步偏好） ───
+const EXPLORE_SOURCE_FIELD = 'exploreSourceUrl'
+
+export function getUserConfig() {
+  return http.get<Record<string, unknown>>('/getUserConfig').then((r) => r.data)
+}
+
+export function saveUserConfig(config: Record<string, unknown>) {
+  return http.post<string>('/saveUserConfig', config).then((r) => r.data)
+}
+
+/**
+ * 读取服务端保存的「发现书源」选择。
+ * 未登录 / 尚无备份文件 / 网络异常时返回空串，调用方回退到本地 localStorage。
+ */
+export async function fetchExploreSourcePreference(): Promise<string> {
+  try {
+    const cfg = await getUserConfig()
+    if (!cfg || typeof cfg !== 'object') return ''
+    return String((cfg as Record<string, unknown>)[EXPLORE_SOURCE_FIELD] ?? '')
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 把「发现书源」选择写回服务端：先读回现有配置再合并，避免覆盖其他字段；
+ * 值未变化或写入失败（如未登录）时静默跳过，本地选择仍然有效。
+ */
+export async function saveExploreSourcePreference(url: string): Promise<void> {
+  let cfg: Record<string, unknown> = {}
+  try {
+    const current = await getUserConfig()
+    if (current && typeof current === 'object') cfg = { ...current }
+  } catch {
+    // 首次使用（服务端尚无 userConfig.json）时以空对象为基线
+  }
+  if (String(cfg[EXPLORE_SOURCE_FIELD] ?? '') === url) return
+  delete cfg['@updateTime']
+  try {
+    await saveUserConfig({ ...cfg, [EXPLORE_SOURCE_FIELD]: url })
+  } catch {
+    // 未登录或写入失败时保留本地选择，不打断用户操作
+  }
+}

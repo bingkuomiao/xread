@@ -182,7 +182,7 @@ function handleSearch() {
   if (!value) return
 
   shelfStore.startSearch(value, {
-    scope: 'source',
+    scope: appStore.searchAllByDefault ? 'all' : 'source',
     sourceUrl: route.path === '/explore' ? exploreStore.activeSourceUrl : '',
   })
 

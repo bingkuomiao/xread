@@ -40,9 +40,9 @@
           </div>
 
           <!-- Intro -->
-          <div v-if="book.intro" class="book-intro">
+          <div v-if="plainIntro" class="book-intro">
             <h3>简介</h3>
-            <p>{{ book.intro }}</p>
+            <p>{{ plainIntro }}</p>
           </div>
 
           <!-- Chapters -->
@@ -135,6 +135,23 @@ const coverSrc = computed(() => {
 const displayChapters = computed(() => {
   if (showAllChapters.value) return chapters.value
   return chapters.value.slice(0, 50)
+})
+
+// 书源返回的简介常包裹 HTML（如 <div class="content-intro">、<p class="detail-btn">），
+// 直接显示会把标签当纯文本。这里先还原字面量转义字符（如反斜杠 n/r/t），
+// 再剥掉标签、压缩空白，<br> 与块级标签转成换行后保留为纯文本。
+const plainIntro = computed(() => {
+  const src = props.book?.intro
+  if (!src) return ''
+  const raw = src.replace(/\\n|\\r/g, '\n').replace(/\\t/g, ' ')
+  return raw
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|h[1-6])>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 })
 
 watch(() => props.modelValue, async (visible) => {

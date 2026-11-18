@@ -241,7 +241,18 @@ const kindChips = computed<KindChip[]>(() => {
 
 const bookIntro = computed(() => {
   if (!props.isSearch) return ''
-  return asSearchBook.value.intro?.trim() || ''
+  const raw = asSearchBook.value.intro?.trim() || ''
+  // 后端返回的简介中可能含有字面量转义字符（如反斜杠 n / r / t），
+  // 直接渲染会显示为 '\n' 字样，这里将其还原为空白并压缩多余空白。
+  const cleaned = raw
+    .replace(/\\n|\\r|\\t/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  // 书源规则模板未被渲染时（含 $. 字段访问 / @js: / <js> / ${ 等特征），
+  // 会以源码形式泄漏为「简介」文本（如 "$.chapters_update_time&&..."）。
+  // 这类非自然语言内容直接隐藏，避免把规则代码展示给用户。
+  if (/(\$\.|@js\s*[:<]|<js>|\$\{)/.test(cleaned)) return ''
+  return cleaned
 })
 </script>
 

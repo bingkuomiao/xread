@@ -7,53 +7,24 @@
         <h2>发现</h2>
       </header>
 
-      <!-- 筛选控件：下拉切换（类型/频道/平台/字数/更新/排序等） -->
-      <div v-if="store.filterKinds.length" class="filter-bar" ref="filterBarRef">
-        <div
+      <!-- 筛选控件：原生 <select>（类型/频道/平台/字数/更新/排序等），
+           与书源工作区「全部分组」下拉共用 .native-select 样式 -->
+      <div v-if="store.filterKinds.length" class="filter-bar">
+        <label
           v-for="kind in store.filterKinds"
           :key="kind.paramKey || kind.title"
-          class="filter-dropdown"
+          class="filter-select-field"
         >
-          <button
-            type="button"
-            class="filter-chip"
-            :class="{ active: openFilterKey === (kind.paramKey || kind.title) }"
-            @click.stop="toggleFilterDropdown(kind.paramKey || kind.title)"
+          <span class="filter-select-label">{{ kind.title }}</span>
+          <select
+            class="native-select filter-select"
+            :value="currentVarValue(kind)"
+            :aria-label="kind.title"
+            @change="selectFilterOption(kind, ($event.target as HTMLSelectElement).value)"
           >
-            <span class="filter-chip-label">{{ kind.title }}</span>
-            <span class="filter-chip-val">{{ currentVarValue(kind) }}</span>
-            <svg
-              class="filter-chip-arrow"
-              :class="{ open: openFilterKey === (kind.paramKey || kind.title) }"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path d="m6 9 6 6 6-6" />
-            </svg>
-          </button>
-
-          <!-- 自定义通透毛玻璃下拉菜单 -->
-          <Transition name="dropdown-fade">
-            <div
-              v-if="openFilterKey === (kind.paramKey || kind.title)"
-              class="filter-menu"
-              @click.stop
-            >
-              <button
-                v-for="opt in optionsFor(kind)"
-                :key="opt"
-                type="button"
-                class="filter-menu-item"
-                :class="{ active: currentVarValue(kind) === opt }"
-                @click="selectFilterOption(kind, opt)"
-              >
-                {{ opt }}
-              </button>
-            </div>
-          </Transition>
-        </div>
+            <option v-for="opt in optionsFor(kind)" :key="opt" :value="opt">{{ opt }}</option>
+          </select>
+        </label>
       </div>
 
       <!-- 榜单 / 分类标签（默认最多2行，超出可展开） -->
@@ -130,6 +101,7 @@ import { useRouter } from 'vue-router'
 import { useExploreStore } from '../stores/explore'
 import { useReaderStore } from '../stores/reader'
 import { saveBook } from '../api/bookshelf'
+import { fetchExploreSourcePreference } from '../api/user'
 import { useAppStore } from '../stores/app'
 import BookGrid from '../components/BookGrid.vue'
 import BookDetailModal from '../components/BookDetailModal.vue'
@@ -141,28 +113,16 @@ const appStore = useAppStore()
 const router = useRouter()
 
 const scrollContainer = ref<HTMLElement>()
-const filterBarRef = ref<HTMLElement>()
-const openFilterKey = ref<string | null>(null)
 
 function currentVarValue(kind: ExploreKind) {
   const key = kind.paramKey || kind.title
-  return store.variables[key] || kind.default || optionsFor(kind)[0] || ''
-}
-
-function toggleFilterDropdown(key: string) {
-  openFilterKey.value = openFilterKey.value === key ? null : key
+  const chars = kind.chars ?? []
+  return store.variables[key] || kind.default || chars[0] || ''
 }
 
 function selectFilterOption(kind: ExploreKind, opt: string) {
   const key = kind.paramKey || kind.title
   store.setVariable(key, opt)
-  openFilterKey.value = null
-}
-
-function handleClickOutside(e: MouseEvent) {
-  if (openFilterKey.value && filterBarRef.value && !filterBarRef.value.contains(e.target as Node)) {
-    openFilterKey.value = null
-  }
 }
 
 const openingBookUrl = ref('')
@@ -230,19 +190,36 @@ function toggleRanking() {
   isRankingExpanded.value = !isRankingExpanded.value
 }
 
+/**
+ * 从服务端同步「发现」页书源选择：手机上在搜索管理里切换后，
+ * 其他设备刷新 / 重新进入发现页、或切回本标签页时自动跟随。
+ * 未登录、无服务端配置或该书源已失效时静默回退到本地选择。
+ */
+async function syncExploreSourceFromServer() {
+  const url = await fetchExploreSourcePreference()
+  // 服务端偏好仅作多设备跟随；本会话用户主动选过默认源时不再覆盖
+  store.applyServerPreference(url)
+}
+
+function handleVisibilityChange() {
+  if (document.hidden) return
+  void syncExploreSourceFromServer()
+}
+
 onMounted(async () => {
   await store.init()
+  await syncExploreSourceFromServer()
   await nextTick()
   measureRanking()
   window.addEventListener('resize', measureRanking)
-  window.addEventListener('click', handleClickOutside)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
   // 字体加载完成后标签尺寸可能变化，重新测一次。
   document.fonts?.ready.then(measureRanking).catch(() => undefined)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', measureRanking)
-  window.removeEventListener('click', handleClickOutside)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 
 // 榜单/分类标签变化（切换书源、筛选条件后重新拉取）时需要重新测量
@@ -258,12 +235,15 @@ watch(
 
 /**
  * 下拉候选项。部分控件（如「平台」）的候选由书源云端配置动态提供，
- * 首次拿不到 chars 时至少保留当前值，避免下拉框空白无法展示。
+ * 首次拿不到 chars 时至少保留当前值；当前值不在候选中时也补到首位，
+ * 保证原生 <select> 的选中值一定存在于 option 列表里，闭合态不会空白。
  */
 function optionsFor(kind: ExploreKind) {
   const chars = kind.chars ?? []
-  if (chars.length > 0) return chars
-  const current = store.variables[kind.paramKey || kind.title] || kind.default || ''
+  const current = currentVarValue(kind)
+  if (chars.length > 0) {
+    return current && !chars.includes(current) ? [current, ...chars] : chars
+  }
   return current ? [current] : []
 }
 
@@ -359,115 +339,29 @@ async function handleAddToShelf(book: Book | SearchBook) {
   gap: var(--space-2);
 }
 
-.filter-dropdown {
-  position: relative;
-  display: inline-flex;
-}
-
-.filter-chip {
+/* 原生 <select> 筛选下拉：闭合态复用 global.css 的 .native-select，
+   与书源工作区「全部分组」、发现管理「切换书源」同款；展开后的
+   选项列表由系统渲染（PC 浅色 / iOS 深色带勾选）。 */
+.filter-select-field {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 14px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--glass-border);
-  background: var(--glass-bg);
-  box-shadow: var(--glass-shadow), var(--glass-inset-highlight);
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-  transition: all var(--duration-fast) var(--ease-out);
-  cursor: pointer;
-  user-select: none;
+  min-width: 0;
 }
 
-.filter-chip:hover,
-.filter-chip.active {
-  background: var(--glass-bg-hover);
-  border-color: rgba(255, 255, 255, 0.85);
-}
-
-.filter-chip-label {
+.filter-select-label {
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
   white-space: nowrap;
 }
 
-.filter-chip-val {
-  color: var(--color-text);
+.filter-select {
+  min-width: 96px;
+  max-width: 180px;
+  min-height: 34px;
+  padding: 0 30px 0 10px;
   font-size: var(--text-sm);
   font-weight: 600;
-  white-space: nowrap;
-}
-
-.filter-chip-arrow {
-  width: 13px;
-  height: 13px;
-  color: var(--color-text-tertiary);
-  transition: transform var(--duration-fast) var(--ease-out);
-}
-
-.filter-chip-arrow.open {
-  transform: rotate(180deg);
-  color: var(--color-primary);
-}
-
-/* 自定义通透磨砂毛玻璃下拉菜单 */
-.filter-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: var(--z-dropdown, 150);
-  min-width: 110px;
-  max-height: 240px;
-  overflow-y: auto;
-  padding: 6px;
-  border-radius: 14px;
-  border: 1px solid var(--glass-border);
-  background: var(--glass-bg);
-  box-shadow: var(--glass-shadow-hover), var(--glass-inset-highlight);
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.filter-menu-item {
-  width: 100%;
-  padding: 7px 12px;
-  border-radius: 8px;
-  border: none;
-  background: transparent;
-  color: var(--color-text);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  text-align: center;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all var(--duration-fast) var(--ease-out);
-}
-
-.filter-menu-item:hover {
-  background: var(--glass-bg-hover);
-  color: var(--color-primary);
-}
-
-.filter-menu-item.active {
-  background: var(--color-primary-bg);
-  color: var(--color-primary);
-  font-weight: 600;
-}
-
-.dropdown-fade-enter-active,
-.dropdown-fade-leave-active {
-  transition: opacity var(--duration-fast) ease, transform var(--duration-fast) ease;
-}
-
-.dropdown-fade-enter-from,
-.dropdown-fade-leave-to {
-  opacity: 0;
-  transform: translate(-50%, -6px);
 }
 
 /* 榜单标签栏：最多显示两行，超出部分折叠，可用箭头展开 */

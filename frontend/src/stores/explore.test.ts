@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { computed } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
-import { useExploreStore } from './explore'
+import { useExploreStore, isExploreDefaultSource } from './explore'
 import { useSourceStore } from './source'
 import { getBookSources } from '../api/source'
 import { exploreBook, getExploreKinds } from '../api/explore'
@@ -41,6 +42,41 @@ describe('explore store source sync', () => {
     expect(store.activeSourceUrl).toBe('https://m.cuoceng.com')
     expect(store.fallbackCategories.map((category) => category.title)).toEqual(['书 库', '排 行'])
     expect(store.activeCategoryUrl).toBe('/book/category/catalog.html')
+  })
+
+  it('reflects the preferred source immediately without switching pages', () => {
+    const store = useExploreStore()
+    // 让 setSource 走「当前源已生效」分支，避免触发异步 applySource / 网络请求
+    store.activeSourceUrl = 'https://a.example'
+    const flag = computed(() => isExploreDefaultSource('https://a.example'))
+    expect(flag.value).toBe(false)
+    store.setSource('https://a.example')
+    // computed 依赖的是响应式偏好镜像：再次读取即为新值，无需切换书源或重开弹窗
+    expect(flag.value).toBe(true)
+  })
+
+  it('keeps a local user choice when a stale server preference arrives', () => {
+    const sourceStore = useSourceStore()
+    const a = sourceWithExplore()
+    const b = { ...a, bookSourceUrl: 'https://b.example', bookSourceName: 'b.example' }
+    sourceStore.sources = [a, b]
+    const store = useExploreStore()
+    store.activeSourceUrl = a.bookSourceUrl
+    store.setSource(b.bookSourceUrl) // 用户主动选择 b
+    // 服务端仍返回旧值 a（且 a 有效）：不应把刚选的 b 覆盖回去
+    store.applyServerPreference(a.bookSourceUrl)
+    expect(store.activeSourceUrl).toBe(b.bookSourceUrl)
+  })
+
+  it('follows a valid server preference when no local choice was made', () => {
+    const sourceStore = useSourceStore()
+    const a = sourceWithExplore()
+    const b = { ...a, bookSourceUrl: 'https://b.example', bookSourceName: 'b.example' }
+    sourceStore.sources = [a, b]
+    const store = useExploreStore()
+    store.activeSourceUrl = a.bookSourceUrl
+    store.applyServerPreference(b.bookSourceUrl)
+    expect(store.activeSourceUrl).toBe(b.bookSourceUrl)
   })
 })
 

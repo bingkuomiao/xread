@@ -99,6 +99,32 @@ ul, ol {
   background-color: var(--color-text-tertiary);
 }
 
+/* ─── Native select：书源分组 / 发现管理 / 发现页筛选共用 ───
+   闭合态：浅边框 + 沉底背景 + 圆角 + 右侧箭头（appearance:none 隐藏原生箭头）。
+   展开后的选项列表交给系统渲染：PC 是浅色系统列表、iOS 是深色带勾选的
+   系统列表，与书源工作区「全部分组」下拉保持一致，不再用自定义深色弹层。 */
+.native-select {
+  min-width: 150px;
+  min-height: 40px;
+  padding: 0 34px 0 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-sunken);
+  color: inherit;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238898aa' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px;
+}
+
+.native-select:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
 /* ─── Utility Classes ─── */
 .sr-only {
   position: absolute;

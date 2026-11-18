@@ -35,15 +35,37 @@
             <span>分组</span>
             <strong>{{ overview.group }}</strong>
           </div>
-          <div class="overview-card">
-            <span>发现</span>
-            <strong>{{ overview.exploreText }}</strong>
+          <!-- 「发现可用」卡片右侧放开关按钮：仿搜索管理弹窗的
+               .action-btn.search-toggle，点击设为默认变主色实心，再点取消恢复灰色 -->
+          <div class="overview-card overview-card-switch">
+            <div class="overview-card-text">
+              <span>发现</span>
+              <strong>{{ overview.exploreText }}</strong>
+            </div>
+            <button
+              v-if="canSetExploreDefault"
+              class="action-btn search-toggle"
+              :class="{ active: isExploreDefault }"
+              type="button"
+              role="switch"
+              :aria-checked="isExploreDefault"
+              :disabled="settingDefault"
+              title="设为发现页默认书源"
+              aria-label="设为发现页默认书源"
+              @click="toggleExploreDefault"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+              {{ isExploreDefault ? '已设置默认' : '已取消默认' }}
+            </button>
           </div>
           <div class="overview-card">
             <span>Cookie</span>
             <strong>{{ overview.cookieText }}</strong>
           </div>
         </div>
+
 
         <div class="rule-section">
           <h4>规则覆盖</h4>
@@ -95,9 +117,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { BookSource } from '../../types'
 import { getBookSourceOverview } from '../../utils/sourceSelection'
+import { useExploreStore, isExploreDefaultSource, refreshExploreDefaultPreference } from '../../stores/explore'
+import { useSourceStore } from '../../stores/source'
+import { useAppStore } from '../../stores/app'
+import { saveExploreSourcePreference } from '../../api/user'
 
 type TabKey = 'overview' | 'json' | 'login'
 
@@ -125,6 +151,63 @@ const tabs: { key: TabKey; label: string }[] = [
 ]
 
 const overview = computed(() => getBookSourceOverview(props.source))
+
+const exploreStore = useExploreStore()
+const sourceStore = useSourceStore()
+const appStore = useAppStore()
+const settingDefault = ref(false)
+
+// 与 exploreStore.exploreSources（enabledExplore && exploreUrl）判定条件一致，
+// 但只看当前书源自身字段，不依赖 sourceStore 是否已加载，
+// 避免书源管理弹窗里按钮不显示 / 点了不生效。
+const canSetExploreDefault = computed(() => {
+  const s = props.source
+  if (!s) return false
+  return s.enabledExplore === true && Boolean((s.exploreUrl || '').trim())
+})
+
+// 开关只反映「用户是否明确把该书源设为默认」（localStorage 偏好），
+// 不用 activeSourceUrl：后者会被 ensureActiveSource 自动回落到列表第一个源，
+// 导致关掉开关后又弹回「开」。
+const isExploreDefault = computed(() => {
+  const url = props.source?.bookSourceUrl
+  if (!url) return false
+  return isExploreDefaultSource(url)
+})
+
+// 切换书源时把偏好镜像与 localStorage 对齐（兼容发现管理弹窗 / 其他标签页改动），
+// 保证切回来看到的是最新状态；点击开关本身由 setSource 即时刷新，无需切换。
+watch(
+  () => props.source?.bookSourceUrl,
+  () => refreshExploreDefaultPreference(),
+)
+
+async function toggleExploreDefault() {
+  const url = props.source?.bookSourceUrl
+  if (!url) return
+  settingDefault.value = true
+  try {
+    if (isExploreDefault.value) {
+      // 关：清掉用户偏好（本地 + 服务端），发现页回到自动选择
+      exploreStore.setSource('')
+      appStore.showToast('已取消发现页默认书源', 'success')
+      // 后台写回服务端供其他设备跟随，不阻塞 UI（本地选择已即时生效）
+      void saveExploreSourcePreference('')
+    } else {
+      // 开：先保证 sourceStore 有数据，避免 exploreStore 的 watch 把刚设的
+      // activeSourceUrl 清掉；然后本地立即生效 + 写回服务端供其他设备跟随。
+      if (sourceStore.sources.length === 0) {
+        await sourceStore.fetchSources().catch(() => undefined)
+      }
+      exploreStore.setSource(url)
+      appStore.showToast('已设为发现页默认书源', 'success')
+      // 后台写回服务端供其他设备跟随，不阻塞 UI（本地选择已即时生效）
+      void saveExploreSourcePreference(url)
+    }
+  } finally {
+    settingDefault.value = false
+  }
+}
 </script>
 
 <style scoped>
@@ -226,16 +309,83 @@ const overview = computed(() => getBookSourceOverview(props.source))
   padding: 12px;
 }
 
-.overview-card span,
+.overview-card > span,
+.overview-card-text > span,
 .source-url-block span {
   color: var(--color-text-tertiary);
   font-size: 12px;
 }
 
-.overview-card strong {
+.overview-card > strong,
+.overview-card-text > strong {
   display: block;
   margin-top: 6px;
   font-size: 15px;
+}
+
+/* 「发现可用」卡片：文字在左，默认书源开关按钮在右。
+   完全复刻搜索管理弹窗的 .action-btn.search-toggle：
+   关闭态浅灰描边 + 深色字，开启态主色实心 + 白字，点击即变色。 */
+.overview-card-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.overview-card-text {
+  min-width: 0;
+}
+
+/* 与搜索管理弹窗「精确匹配」的 .action-btn.search-toggle 完全一致：
+   浅边框沉底 + 激活态主色实心，✓ 图标与状态文字左右排列，圆角 --radius-md。 */
+.action-btn {
+  flex-shrink: 0;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 8px 12px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: all var(--duration-fast);
+}
+
+.action-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.action-btn:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+.action-btn.search-toggle.active {
+  color: #fff;
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.action-btn.search-toggle.active:hover:not(:disabled) {
+  background: var(--color-primary-dark);
+  color: #fff;
+}
+
+.action-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.action-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 .rule-section {
