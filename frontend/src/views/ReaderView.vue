@@ -47,6 +47,8 @@
       @ai="openAiBook"
       @tts="handleTTS"
       @progress="openCachePanel"
+      @goExplore="goExplore"
+      @removeBook="handleRemoveBook"
     />
 
     <ReaderTtsPanel
@@ -348,6 +350,7 @@ import { ref, computed, watch, onMounted, onUnmounted, onBeforeUnmount, nextTick
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useReaderStore, fontPresets } from '../stores/reader'
 import { useAppStore } from '../stores/app'
+import { useBookshelfStore } from '../stores/bookshelf'
 import { getBookInfo, withAuthQuery } from '../api/bookshelf'
 import { applySystemTheme } from '../utils/systemUi'
 import { countBrowserBookCache } from '../utils/browserCache'
@@ -381,6 +384,7 @@ const ReaderSearchPanel = defineAsyncComponent(() => import('../components/reade
 const router = useRouter()
 const store = useReaderStore()
 const appStore = useAppStore()
+const bookshelfStore = useBookshelfStore()
 const READER_POSITION_PREFIX = 'reader-position:'
 const SERVER_PROGRESS_AUTOSAVE_MS = 10000
 
@@ -563,6 +567,50 @@ const currentFontFamily = computed(() => {
   return preset ? preset.family : ''
 })
 
+// 过滤书源正文里混入的站点分页垃圾（「本章未完，点击下一页继续阅读」「第1/2页」等），
+// 这类内容会让章节标题像出现在文章中间，属于内容噪声而非真实章节
+function isPaginationNoise(text: string): boolean {
+  const t = (text || '').replace(/[\s\u3000\u00A0]/g, '')
+  if (!t) return true
+  if (/本章未完|请点击下一页|点击下一页继续|下一页继续阅读|点击查看下一页/.test(t)) return true
+  // 「(第1/2页)」「第1/2页」这类页码标记（必须带“页”字，避免误伤正文分数），且整行较短
+  if (t.length <= 40 && /(?:[（(]\s*)?第?\s*\d+\s*[\/／]\s*\d+\s*页/.test(t)) return true
+  // 书源分页残留的假章节标题：整行是「第X章 标题」这种紧凑短标题（可能带 (第M/N页)）。
+  // 真实章节标题由渲染层的 .chapter-title 统一显示，正文里的这类短标题是重复内容，
+  // 会造成「双标题」「标题时粗时不粗」，必须清除。
+  // 严格限制：整行不含句读标点、总长很短，避免误伤「第一章就写了三千字」这类正常正文句子。
+  if (t.length <= 24 && !/[，。、；：！？,.!?;:]/.test(t)) {
+    if (/^第[\d零〇一二三四五六七八九十百千万两]+[章节回部篇集][\s\u3000\u00A0]*[^，。、]/.test(t)) return true
+    if (/^第[\d零〇一二三四五六七八九十百千万两]+[章节回部篇集]$/.test(t)) return true
+  }
+  return false
+}
+
+// 在 HTML 容器内逐文本节点清洗噪声行。书源正文常把假标题/分页提示塞在裸文本节点里
+// （不在 <p> 中），旧逻辑只处理 <p>，导致这类噪声漏网；这里统一按文本行过滤。
+function stripNoiseTextNodes(root: HTMLElement) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement
+      if (parent && ['SCRIPT', 'STYLE'].includes(parent.tagName)) return NodeFilter.FILTER_REJECT
+      return NodeFilter.FILTER_ACCEPT
+    },
+  })
+  const nodes: Text[] = []
+  while (walker.nextNode()) nodes.push(walker.currentNode as Text)
+  nodes.forEach((node) => {
+    const val = node.nodeValue || ''
+    if (!val) return
+    if (isPaginationNoise(val)) {
+      node.nodeValue = ''
+      return
+    }
+    if (val.includes('\n')) {
+      node.nodeValue = val.split('\n').filter((line) => !isPaginationNoise(line)).join('\n')
+    }
+  })
+}
+
 function formatChapterHtml(rawText: string) {
   if (!rawText) return ''
   const text = rawText
@@ -571,25 +619,69 @@ function formatChapterHtml(rawText: string) {
 
   if (/<[a-z][\s\S]*>/i.test(text)) {
     wrapper.innerHTML = text
+
+    // 先逐文本节点清洗假标题/分页提示（这些常散落在 <p> 之外的裸文本节点里）
+    stripNoiseTextNodes(wrapper)
+
+    // 去掉 <p> 之外散落的裸 <br>，避免段落间出现整行空白（无双小说等站点常见）
+    Array.from(wrapper.childNodes).forEach((node) => {
+      if (node.nodeName === 'BR') node.parentNode?.removeChild(node)
+    })
+
     const paragraphs = Array.from(wrapper.querySelectorAll('p')) as HTMLParagraphElement[]
     if (paragraphs.length) {
       paragraphs.forEach((paragraph) => {
-        const plainText = (paragraph.textContent || '').replace(/^[\u3000\u00A0 \t]+/, '').trim()
-        const hasRenderableChildren = Boolean(paragraph.querySelector('img, br, ruby, table, ul, ol'))
+        // 先剔除整段分页噪声，避免「本章未完」「第1/2页」等混入正文
+        if (isPaginationNoise(paragraph.textContent || '')) {
+          paragraph.remove()
+          return
+        }
+        // 归一化 &nbsp; 为普通空格，避免拆段后段首残留字面实体
+        let inner = paragraph.innerHTML.replace(/&nbsp;/gi, ' ')
+        // 去掉段落首尾的空白文本节点与 <br>
+        inner = inner
+          .replace(/^(?:[\s\u3000\u00A0]|<br\s*\/?>)+/i, '')
+          .replace(/(?:[\s\u3000\u00A0]|<br\s*\/?>)+$/i, '')
+        // 连续 <br>（站点段尾常塞 4~5 个）折叠为一个分段标记
+        inner = inner.replace(/(?:<br\s*\/?>[\s\u3000\u00A0]*){2,}/gi, '<br>')
+        paragraph.innerHTML = inner
+
+        // 段内用单个 <br> 分隔的，拆成独立段落，保证每段都有统一段间距/缩进
+        const brs = Array.from(paragraph.querySelectorAll('br'))
+        if (brs.length && /(?:<img|<ruby|<table|<ul|<ol)/i.test(paragraph.innerHTML) === false) {
+          const fragment = document.createDocumentFragment()
+          const parts = paragraph.innerHTML.split(/<br\s*\/?>/i)
+          parts.forEach((part) => {
+            const cleaned = part.replace(/^[\u3000\u00A0\s]+/, '').trim()
+            if (!cleaned || isPaginationNoise(cleaned)) return
+            const p = document.createElement('p')
+            p.innerHTML = cleaned
+            fragment.appendChild(p)
+          })
+          paragraph.replaceWith(fragment)
+          return
+        }
+
+        const plainText = (paragraph.textContent || '').replace(/[\u3000\u00A0\s]/g, '').trim()
+        const hasRenderableChildren = Boolean(paragraph.querySelector('img, ruby, table, ul, ol'))
         if (!plainText && !hasRenderableChildren) {
           paragraph.remove()
           return
         }
         paragraph.innerHTML = paragraph.innerHTML.replace(/^[\u3000\u00A0 \t]+/, '')
-        paragraph.style.marginTop = '0'
-        paragraph.style.marginBottom = `${config.value.paragraphSpacing}em`
-        paragraph.classList.toggle('reader-indent', config.value.firstLineIndent)
+      })
+
+      // 统一设置所有最终段落（含刚拆出的）的间距与缩进
+      Array.from(wrapper.querySelectorAll('p')).forEach((p) => {
+        p.style.marginTop = '0'
+        p.style.marginBottom = `${config.value.paragraphSpacing}em`
+        p.classList.toggle('reader-indent', config.value.firstLineIndent)
       })
     }
   } else {
     wrapper.innerHTML = text
       .split(/\n/)
-      .filter((line: string) => line.trim())
+      .filter((line: string) => line.trim() && !isPaginationNoise(line))
       .map((line: string) => {
         const shouldIndent = config.value.firstLineIndent
         const content = escapeHtmlText(stripLeadingIndent(line.trimEnd()))
@@ -1019,6 +1111,169 @@ function syncHorizontalPageState() {
   serverProgressAutoSaveScheduler.schedule()
 }
 
+/**
+ * 按"真实渲染行边界"对齐的滚动翻页，解决首行/末行文字被从中间截断、相邻屏重复的问题。
+ *
+ * 关键：正文段落带段距（margin-bottom）、章节带标题与内边距（padding-top: 80px 等），
+ * 真实行顶并不是行高的整数倍，也不是从 0 开始。若按 lineHeight 数学取整，
+ * 落点必然卡在某行的中间 → 首行/末行被垂直切掉一半。
+ * 这里用 Range.getClientRects() 直接量出每个段落每一行的真实顶部坐标，
+ * 翻页落点吸附到这些真实边界，保证每一行都完整落在某一屏内。
+ */
+
+/** 收集视口附近的真实行顶坐标（文档坐标系，已含当前 scrollTop） */
+function collectLineTops(container: HTMLElement): number[] {
+  const cRect = container.getBoundingClientRect()
+  const scrollTop = container.scrollTop
+  // 只测量视口前后各一屏，避免长篇连续阅读时全量测量带来的开销
+  const lo = scrollTop - container.clientHeight
+  const hi = scrollTop + container.clientHeight * 2
+  const tops: number[] = [0]
+
+  container.querySelectorAll('.chapter-text').forEach((textEl) => {
+    const host = textEl as HTMLElement
+    const paragraphs = host.querySelectorAll('p')
+    const nodes: Element[] = paragraphs.length ? Array.from(paragraphs) : [host]
+    nodes.forEach((node) => {
+      const el = node as HTMLElement
+      const rect = el.getBoundingClientRect()
+      const top = rect.top - cRect.top + scrollTop
+      if (top + rect.height < lo || top > hi) return
+      const range = document.createRange()
+      range.selectNodeContents(el)
+      const rects = range.getClientRects()
+      for (let i = 0; i < rects.length; i += 1) {
+        const r = rects[i]
+        if (r.height > 1 && r.width > 0) {
+          tops.push(Math.round(r.top - cRect.top + scrollTop))
+        }
+      }
+    })
+  })
+
+  // 章节标题顶部也是合法页首边界，避免标题被从中间截断
+  container.querySelectorAll('.chapter-title').forEach((title) => {
+    const top = (title as HTMLElement).getBoundingClientRect().top - cRect.top + scrollTop
+    if (top >= lo && top <= hi) tops.push(Math.round(top))
+  })
+
+  return Array.from(new Set(tops)).sort((a, b) => a - b)
+}
+
+/**
+ * 在真实行顶坐标里，找翻页落点：
+ * - 向前（direction=1）：取 <= target 的最后一个整行顶（floor）。这样落点正好是一行的顶部，
+ *   新页首行完整；且上一屏底部不会切在行中间——避免「最后一行显示不全」。
+ *   不能用 ceil（>= target），否则会跳过一整行、把视口底边切在某行中段。
+ * - 向后（direction=-1）：对称地取 >= target 的第一个整行顶（ceil），保证新页首行完整。
+ */
+function nearestLineTop(tops: number[], target: number, direction: 1 | -1): number {
+  if (!tops.length) return target
+  if (direction > 0) {
+    let best = tops[0]
+    for (const t of tops) {
+      if (t <= target + 1) best = t
+      else break
+    }
+    return best
+  }
+  for (const t of tops) {
+    if (t >= target - 1) return t
+  }
+  return tops[tops.length - 1]
+}
+
+function pageScrollStep(container: HTMLElement): number {
+  // 翻动接近一整屏；真实落点由 nearestLineTop 吸附到整行边界
+  return container.clientHeight
+}
+
+/**
+ * 挑一个"页首对齐真实行顶、页尾落在行间隙"的落点：
+ * 之前只用 floor 对齐页首（<= target 的最后一行顶），首行完整，但视口底部常常正好切在
+ * 某一行的中间，表现为"最后一行文字显示不全"。这里在目标位置前后各约一行的范围内
+ * 枚举候选行顶，优先选择让"落点+视口高"刚好落在下一行顶之前的那一个——这样最后一行
+ * 完整显示、底部还留一点空白间隙，不会把字从中间截断。
+ */
+function bottomSafeLanding(lineTops: number[], target: number, vh: number, curTop: number): number {
+  const fallback = nearestLineTop(lineTops, target, 1)
+  if (lineTops.length < 2) return fallback
+  const pitch = Math.max(1, config.value.fontSize * config.value.lineHeight)
+  const lo = target - pitch * 2
+  const hi = target + pitch * 2
+  let best = fallback
+  let bestGap = Infinity
+  let bestDist = Infinity
+  for (const landing of lineTops) {
+    if (landing <= curTop + 1) continue
+    if (landing < lo || landing > hi) continue
+    const bottom = landing + vh
+    // bottom 之上的最近行顶：gap 越小，说明页尾越贴近行间隙，末行越完整
+    let gap = Infinity
+    for (const t of lineTops) {
+      if (t >= bottom) { gap = t - bottom; break }
+    }
+    if (!Number.isFinite(gap)) continue
+    const dist = Math.abs(landing - target)
+    if (gap < bestGap - 0.5 || (Math.abs(gap - bestGap) <= 0.5 && dist < bestDist)) {
+      bestGap = gap
+      bestDist = dist
+      best = landing
+    }
+  }
+  return best
+}
+
+/**
+ * 翻页落点：让章节标题另起一页、且首末行都完整。
+ * 1) 章节标题：凡是落在当前视口下半部、或紧随其后一屏内的标题，都直接吸附到它的顶部，
+ *    让新章节从页首开始（标题在新的一页），避免标题卡在页尾。
+ * 2) 无合适标题时，用 bottomSafeLanding 同时照顾页首与页尾，避免末行被从中间截断。
+ */
+function snapPageTarget(container: HTMLElement, target: number, direction: 1 | -1): number {
+  const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight)
+  const vh = container.clientHeight
+  const clamped = Math.max(0, Math.min(maxScroll, target))
+  const lineTops = collectLineTops(container)
+  const cRect = container.getBoundingClientRect()
+  const curTop = container.scrollTop
+
+  // 章节标题作为分页点：连续模式的 .chapter-title 元素
+  const titleEls: HTMLElement[] = Array.from(container.querySelectorAll('.chapter-title'))
+
+  const tolerance = vh * 0.85
+  let bestTop: number | null = null
+  let bestDist = Infinity
+  titleEls.forEach((title) => {
+    const top = Math.round(title.getBoundingClientRect().top - cRect.top + curTop)
+    if (direction > 0) {
+      // 标题在当前视口下半部或紧随其后（属于「下一屏应该从标题开始」的情况）
+      const lower = curTop + vh * 0.28
+      const upper = curTop + vh + tolerance
+      if (top >= lower && top <= upper) {
+        const dist = Math.abs(top - clamped)
+        if (dist < bestDist) { bestDist = dist; bestTop = top }
+      }
+    } else {
+      // 向后翻：标题在当前视口上半部或紧邻其前
+      const upper = curTop + vh * 0.72
+      const lower = curTop - vh * 0.85
+      if (top <= upper && top >= lower) {
+        const dist = Math.abs(top - clamped)
+        if (dist < bestDist) { bestDist = dist; bestTop = top }
+      }
+    }
+  })
+  if (bestTop !== null) return Math.max(0, Math.min(maxScroll, bestTop))
+
+  const lineTarget = direction > 0
+    ? bottomSafeLanding(lineTops, clamped, vh, curTop)
+    : nearestLineTop(lineTops, clamped, direction)
+  // 接近章节末尾时，整行 floor 可能停在原处导致翻页卡住；此时直接滚到底，下一次翻页切章。
+  if (direction > 0 && lineTarget <= curTop + 2) return maxScroll
+  return lineTarget
+}
+
 function pageForward() {
   const container = scrollContainerRef.value
   if (!container) return
@@ -1035,12 +1290,13 @@ function pageForward() {
     syncHorizontalPageState()
     return
   }
-  const step = container.clientHeight * 0.88
-  if (container.scrollTop + container.clientHeight >= container.scrollHeight - 10) {
+  if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
     nextChapter()
     return
   }
-  container.scrollBy({ top: step, behavior: 'smooth' })
+  const step = pageScrollStep(container)
+  const target = snapPageTarget(container, container.scrollTop + step, 1)
+  container.scrollTo({ top: target, behavior: 'instant' })
 }
 
 function pageBackward() {
@@ -1058,26 +1314,48 @@ function pageBackward() {
     syncHorizontalPageState()
     return
   }
-  const step = container.clientHeight * 0.88
+  const step = pageScrollStep(container)
   if (isContinuousMode.value) {
-    if (container.scrollTop <= 10) {
+    if (container.scrollTop <= 2) {
       void loadContinuousPrev()
       return
     }
-    container.scrollBy({ top: -step, behavior: 'smooth' })
+    const target = snapPageTarget(container, container.scrollTop - step, -1)
+    container.scrollTo({ top: Math.max(0, target), behavior: 'instant' })
     return
   }
-  if (container.scrollTop <= 10) {
+  if (container.scrollTop <= 2) {
     prevChapter()
     return
   }
-  container.scrollBy({ top: -step, behavior: 'smooth' })
+  const target = snapPageTarget(container, container.scrollTop - step, -1)
+  container.scrollTo({ top: Math.max(0, target), behavior: 'instant' })
 }
 
 // Navigation
 async function goHome() {
   await persistReadingProgressBeforeLeave()
   router.replace('/')
+}
+
+/** 发现页：保存进度后跳转到发现 */
+async function goExplore() {
+  await persistReadingProgressBeforeLeave()
+  router.push('/explore')
+}
+
+/** 从书架移除当前书：二次确认后删除并返回书架 */
+async function handleRemoveBook() {
+  const currentBook = store.book
+  if (!currentBook) return
+  if (!confirm(`确定从书架删除 "${currentBook.name}"？`)) return
+  try {
+    await bookshelfStore.removeBook(currentBook)
+    appStore.showToast(`已删除 "${currentBook.name}"`, 'success')
+    router.replace('/')
+  } catch {
+    appStore.showToast('删除失败，请稍后重试', 'warning')
+  }
 }
 
 function handlePageHide() {
@@ -1617,24 +1895,24 @@ function clickZoneAction(zone: 'prev' | 'menu' | 'next') {
   }
 
   const h = container.clientHeight
-  const delta = h * 0.8 // Page scroll amount
+  const delta = pageScrollStep(container) // 按整行翻页，避免半行截断与相邻屏重复
 
   if (config.value.clickAction === 'next') {
     pageForward()
     return
   }
-  
+
   if (zone === 'next') {
-    if (container.scrollTop + h >= container.scrollHeight - 10) {
+    if (container.scrollTop + h >= container.scrollHeight - 2) {
       if (config.value.clickAction === 'auto') nextChapter()
     } else {
-      container.scrollBy({ top: delta, behavior: 'smooth' })
+      container.scrollTo({ top: snapPageTarget(container, container.scrollTop + delta, 1), behavior: 'instant' })
     }
   } else {
-    if (container.scrollTop === 0) {
+    if (container.scrollTop <= 2) {
       if (config.value.clickAction === 'auto') prevChapter()
     } else {
-      container.scrollBy({ top: -delta, behavior: 'smooth' })
+      container.scrollTo({ top: Math.max(0, snapPageTarget(container, container.scrollTop - delta, -1)), behavior: 'instant' })
     }
   }
 }
@@ -1779,8 +2057,6 @@ function handleKeydown(e: KeyboardEvent) {
   const container = scrollContainerRef.value
   if (!container) return
 
-  const h = container.clientHeight
-
   switch (e.key) {
     case ' ':
     case 'Space':
@@ -1793,7 +2069,7 @@ function handleKeydown(e: KeyboardEvent) {
       if (isHorizontalPageMode.value) {
         pageForward()
       } else {
-        container.scrollBy({ top: h * 0.8, behavior: 'smooth' })
+        container.scrollTo({ top: snapPageTarget(container, container.scrollTop + pageScrollStep(container), 1), behavior: 'instant' })
       }
       break
     case 'ArrowUp':
@@ -1802,7 +2078,7 @@ function handleKeydown(e: KeyboardEvent) {
       if (isHorizontalPageMode.value) {
         pageBackward()
       } else {
-        container.scrollBy({ top: -(h * 0.8), behavior: 'smooth' })
+        container.scrollTo({ top: Math.max(0, snapPageTarget(container, container.scrollTop - pageScrollStep(container), -1)), behavior: 'instant' })
       }
       break
     case 'ArrowRight':
@@ -2153,6 +2429,9 @@ watch(
 
 <style scoped>
 .reader-view {
+  /* 严格对齐 1.0.80：该版本用户实测底部无白边。
+     之前的 min-height 兜底会让元素高于可视视口，iOS 全屏下底部多出的部分
+     在滚动时会露出外层 body 背景色（表现为白边），故移除，恢复 1.0.80 几何。 */
   height: 100vh;
   height: 100dvh;
   height: var(--app-visual-height, var(--app-height, 100dvh));
@@ -2821,6 +3100,8 @@ watch(
   }
 
   .chapter-content {
+    /* 与 1.0.48.84/85 一致：底部保持 8px。之前叠加 safe-area-bottom 会在滚动到底时
+       让滚动内容越过阅读容器、在底部露出 body 背景色（表现为浅色白边），故回退。 */
     padding: 24px 20px 8px;
     min-height: auto;
     height: auto;
