@@ -72,16 +72,6 @@
               书架管理
             </h3>
             <div class="btn-group vertical-grid">
-              <button class="action-btn" @click="goToBookshelf">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                  <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20" />
-                  <path d="M4 5.5V19a2 2 0 0 0 2 2h14" />
-                  <path d="M8 7h8" />
-                  <path d="M8 11h8" />
-                  <path d="M8 15h5" />
-                </svg>
-                书架
-              </button>
               <button class="action-btn" :disabled="localBookUploading" @click="triggerImportBook">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                   <path d="M12 3v12" />
@@ -506,13 +496,6 @@ function handleOpenRelease() {
 
 async function handleDismissVersionUpdate() {
   await appStore.dismissVersionUpdateReminder()
-}
-
-async function goToBookshelf() {
-  close()
-  if (router.currentRoute.value.path !== '/') {
-    await router.push('/')
-  }
 }
 
 async function triggerImportBook() {

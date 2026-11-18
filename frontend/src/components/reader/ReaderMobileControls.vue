@@ -95,7 +95,7 @@
           </button>
         </div>
 
-        <!-- 功能网格：4 × 2 -->
+        <!-- 功能网格：4 × 3 -->
         <div class="m-grid">
           <button class="m-grid-item" @click="$emit('search')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -163,6 +163,42 @@
             </svg>
             <span>设置</span>
           </button>
+
+          <!-- 第三行：书架 / 发现 / 切换 / 移除（与上方按钮同一 .m-grid-item 样式，尺寸/间距/字号完全一致） -->
+          <button class="m-grid-item" :class="{ active: store.activePanel === 'bookshelf' }" @click="store.togglePanel('bookshelf')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20" />
+              <path d="M4 5.5V19a2 2 0 0 0 2 2h14" />
+              <path d="M8 7h8M8 11h8M8 15h5" />
+            </svg>
+            <span>书架</span>
+          </button>
+
+          <button class="m-grid-item" @click="$emit('goExplore')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3a9 9 0 1 0 9 9" />
+              <path d="m16.24 7.76-2.12 6.36-6.36 2.12 2.12-6.36 6.36-2.12z" />
+            </svg>
+            <span>发现</span>
+          </button>
+
+          <button class="m-grid-item" :class="{ active: store.activePanel === 'source' }" @click="store.togglePanel('source')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 8h13a3 3 0 0 1 0 6" />
+              <path d="m14 5 3 3-3 3" />
+              <path d="M20 16H7a3 3 0 0 1 0-6" />
+              <path d="m10 19-3-3 3-3" />
+            </svg>
+            <span>切换</span>
+          </button>
+
+          <button class="m-grid-item" @click="$emit('removeBook')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+              <path d="M10 11v6M14 11v6" />
+            </svg>
+            <span>移除</span>
+          </button>
         </div>
       </div>
     </Transition>
@@ -192,6 +228,8 @@ const emit = defineEmits<{
   ai: []
   tts: []
   progress: []
+  goExplore: []
+  removeBook: []
 }>()
 
 const store = useReaderStore()
