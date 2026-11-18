@@ -181,10 +181,26 @@ function handleSearch() {
   const value = searchValue.value.trim()
   if (!value) return
 
-  shelfStore.startSearch(value, {
-    scope: appStore.searchAllByDefault ? 'all' : 'source',
-    sourceUrl: route.path === '/explore' ? exploreStore.activeSourceUrl : '',
-  })
+  // 发现页搜索：使用发现页当前书源
+  if (route.path === '/explore') {
+    shelfStore.startSearch(value, {
+      scope: 'source',
+      sourceUrl: exploreStore.activeSourceUrl,
+    })
+  } else if (shelfStore.searchSourcePinned) {
+    // 会话内用户在搜索页手动指定过书源：沿用当前范围/分组/书源，避免频繁重新选择
+    shelfStore.startSearch(value, {
+      scope: shelfStore.searchScope,
+      group: shelfStore.searchGroup,
+      sourceUrl: shelfStore.searchSourceUrl,
+    })
+  } else {
+    // 首次搜索：遵循「默认搜索全部书源」设置
+    shelfStore.startSearch(value, {
+      scope: appStore.searchAllByDefault ? 'all' : 'source',
+      sourceUrl: '',
+    })
+  }
 
   if (route.path !== '/') {
     router.push('/')

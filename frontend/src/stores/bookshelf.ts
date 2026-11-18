@@ -153,6 +153,10 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   const searchCategory = ref<'novel' | 'manga' | 'audio' | 'skit'>('novel')
   const searchGroup = ref('')
   const searchSourceUrl = ref('')
+  // 会话内标记：用户是否在搜索页手动指定过书源范围/书源。
+  // 用于顶栏再次搜索时沿用当前选择，避免频繁重新选择；刷新页面后自动重置。
+  const searchSourcePinned = ref(false)
+  function pinSearchSource() { searchSourcePinned.value = true }
 
   function startSearch(key: string, options: {
     scope?: 'all' | 'group' | 'source'
@@ -178,6 +182,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     searchScope.value = 'source'
     searchGroup.value = ''
     searchSourceUrl.value = ''
+    searchSourcePinned.value = false
   }
 
   const isSearchMode = computed(() => searchKey.value.length > 0)
@@ -278,7 +283,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     groups, activeGroupId, displayGroups, filteredBooks,
     fetchGroups, saveGroup, removeGroup,
     searchResults, isSearching, searchKey,
-    searchScope, searchCategory, searchGroup, searchSourceUrl, startSearch, clearSearch, isSearchMode,
+    searchScope, searchCategory, searchGroup, searchSourceUrl, searchSourcePinned, pinSearchSource, startSearch, clearSearch, isSearchMode,
     editMode,
     selectedBookUrls, toggleSelection, selectAll, clearSelection,
     bulkDelete, bulkSetGroup, reorderBooks, moveBookToFront,

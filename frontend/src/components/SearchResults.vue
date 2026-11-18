@@ -25,7 +25,7 @@
           type="button"
           class="filter-tab"
           :class="{ active: searchScope === 'all' }"
-          @click="searchScope = 'all'"
+          @click="setSearchScope('all')"
         >
           全部书源
         </button>
@@ -33,7 +33,7 @@
           type="button"
           class="filter-tab"
           :class="{ active: searchScope === 'group' }"
-          @click="searchScope = 'group'"
+          @click="setSearchScope('group')"
         >
           按分组
         </button>
@@ -41,14 +41,14 @@
           type="button"
           class="filter-tab"
           :class="{ active: searchScope === 'source' }"
-          @click="searchScope = 'source'"
+          @click="setSearchScope('source')"
         >
           单个书源
         </button>
       </div>
 
       <div v-if="searchScope === 'group'" class="filter-select-wrap">
-        <select v-model="selectedGroup" class="filter-select">
+        <select v-model="selectedGroup" class="filter-select" @change="shelfStore.pinSearchSource()">
           <option v-for="group in sourceGroups" :key="group" :value="group">
             {{ group }}
           </option>
@@ -56,7 +56,7 @@
       </div>
 
       <div v-else-if="searchScope === 'source'" class="filter-select-wrap">
-        <select v-model="selectedSourceUrl" class="filter-select">
+        <select v-model="selectedSourceUrl" class="filter-select" @change="shelfStore.pinSearchSource()">
           <option v-for="source in sourceOptions" :key="source.bookSourceUrl" :value="source.bookSourceUrl">
             {{ source.bookSourceName }}
           </option>
@@ -145,14 +145,19 @@ const sourceOptions = computed(() => {
 })
 
 const displayResults = computed<SearchBook[]>(() => {
-  let list = results.value.map((book) => {
-    const source = sourceByUrl.value.get(book.origin)
-    return {
-      ...book,
-      originName: book.originName || source?.bookSourceName || book.origin,
-      originGroup: book.originGroup || source?.bookSourceGroup,
-    }
-  })
+  // 过滤书源解析失败产生的无效结果：书名或链接为空时既无法阅读也无法加入书架。
+  // 这类脏数据的 bookUrl 也为空，导致列表 key（origin::bookUrl）全部相同，
+  // TransitionGroup 因此出现「0 结果却仍残留一堆无书名卡片」的渲染异常。
+  let list = results.value
+    .filter((book) => !!(book.name || '').trim() && !!(book.bookUrl || '').trim())
+    .map((book) => {
+      const source = sourceByUrl.value.get(book.origin)
+      return {
+        ...book,
+        originName: book.originName || source?.bookSourceName || book.origin,
+        originGroup: book.originGroup || source?.bookSourceGroup,
+      }
+    })
 
   // 精确匹配：仅保留书名（或作者）与关键词完全一致（忽略大小写与首尾空白）的条目。
   // 开关为全局设置（stores/app 的 exactMatch），在「设置 → 搜索管理」中控制。
@@ -230,6 +235,11 @@ function closeEventSource() {
     eventSource.close()
     eventSource = null
   }
+}
+
+function setSearchScope(scope: 'all' | 'group' | 'source') {
+  searchScope.value = scope
+  shelfStore.pinSearchSource()
 }
 
 function ensureSearchSelection() {
