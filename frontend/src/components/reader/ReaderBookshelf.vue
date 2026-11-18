@@ -1,37 +1,33 @@
 <template>
   <div class="reader-bookshelf" :style="{ background: theme.popup, color: theme.fontColor }">
     <div class="shelf-header">
-      <h3>书架 ({{ store.books.length }})</h3>
+      <h3>切换书籍 ({{ store.books.length }})</h3>
       <button class="close-btn" @click="readerStore.closePanel()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12" /></svg>
       </button>
     </div>
-    
+
     <div class="shelf-list">
-      <div
+      <ReaderBookCard
         v-for="book in store.books"
         :key="book.bookUrl"
-        class="shelf-item"
-        :class="{ current: book.bookUrl === readerStore.book?.bookUrl }"
-        @click="openBook(book)"
-      >
-        <img v-if="getCoverUrl(book.coverUrl)" :src="getCoverUrl(book.coverUrl)" class="book-cover" />
-        <div v-else class="book-cover placeholder">无封面</div>
-        
-        <div class="book-info">
-          <div class="book-title">{{ book.name }}</div>
-          <div class="book-author">{{ book.author }}</div>
-          <div class="book-progress">
-            {{ book.durChapterTitle || '未读' }}
-          </div>
-        </div>
-      </div>
+        :cover="getCoverUrl(book.coverUrl)"
+        :title="book.name"
+        :meta="bookMeta(book)"
+        :primary-line="book.durChapterTitle ? `已读：${book.durChapterTitle}` : ''"
+        :latest="book.latestChapterTitle"
+        :badge="book.bookUrl === readerStore.book?.bookUrl ? '当前' : undefined"
+        badge-type="current"
+        :active="armedKey === book.bookUrl"
+        @click="onCardClick(book)"
+      />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import ReaderBookCard from './ReaderBookCard.vue'
 import { useBookshelfStore } from '../../stores/bookshelf'
 import { useReaderStore } from '../../stores/reader'
 import { getCoverUrl } from '../../api/bookshelf'
@@ -40,8 +36,25 @@ const store = useBookshelfStore()
 const readerStore = useReaderStore()
 const theme = computed(() => readerStore.currentTheme)
 
+// 与附件书架卡片一致的「作者 · 共X章」副标题
+function bookMeta(book: Book) {
+  const author = (book.author || '').trim() || '未知作者'
+  const count = book.totalChapterNum || 0
+  return count ? `${author} · 共${count}章` : author
+}
+
 if (!store.books.length) {
   store.fetchBooks()
+}
+
+// 双击进入：第一次点击仅选中（蓝框），再次点击同一本才真正打开
+const armedKey = ref<string | null>(null)
+function onCardClick(book: Book) {
+  if (armedKey.value === book.bookUrl) {
+    openBook(book)
+  } else {
+    armedKey.value = book.bookUrl
+  }
 }
 
 async function openBook(book: Book) {
@@ -89,12 +102,10 @@ async function openBook(book: Book) {
   border: none;
   cursor: pointer;
 }
-
 .close-btn:hover {
   opacity: 1;
   background: rgba(0,0,0,0.05);
 }
-
 .close-btn svg {
   width: 18px;
   height: 18px;
@@ -103,73 +114,8 @@ async function openBook(book: Book) {
 .shelf-list {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 0;
+  padding: 8px 0;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-}
-
-.shelf-item {
-  display: flex;
-  gap: 12px;
-  padding: 10px 20px;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.shelf-item:hover {
-  background: rgba(0,0,0,0.03);
-}
-
-.shelf-item.current {
-  background: color-mix(in srgb, var(--color-primary) 8%, transparent); /* primary slight tint */
-}
-
-.book-cover {
-  width: 48px;
-  height: 64px;
-  object-fit: cover;
-  border-radius: 4px;
-  flex-shrink: 0;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.1);
-}
-
-.book-cover.placeholder {
-  background: rgba(0,0,0,0.1);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  color: rgba(0,0,0,0.4);
-}
-
-.book-info {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  padding: 2px 0;
-}
-
-.book-title {
-  font-size: 15px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.book-author {
-  font-size: 12px;
-  opacity: 0.6;
-}
-
-.book-progress {
-  font-size: 11px;
-  opacity: 0.8;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--color-primary, #f43f5e);
 }
 </style>
