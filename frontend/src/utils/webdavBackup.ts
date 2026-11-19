@@ -15,6 +15,7 @@ import {
   saveBookSources,
 } from '../api/source'
 import type { Book, BookGroup, Bookmark, BookSource, ReplaceRule, RssSource } from '../types'
+import { sanitizeBooks } from './cleanText'
 
 const BACKUP_VERSION = 1
 const LOCAL_STORAGE_KEYS = [
@@ -108,7 +109,7 @@ export function parseWebdavBackup(raw: string) {
     createdAt: payload.createdAt || new Date().toISOString(),
     app: payload.app || 'reader-rust-frontend',
     bookshelf: {
-      books: payload.bookshelf.books || [],
+      books: sanitizeBooks(payload.bookshelf.books),
       groups: payload.bookshelf.groups || [],
     },
     bookSources: payload.bookSources || [],
