@@ -149,11 +149,12 @@
             <span>朗读</span>
           </button>
 
-          <button class="m-grid-item" :class="{ active: store.activePanel === 'settings' }" @click="store.togglePanel('settings')">
+          <button class="m-grid-item" @click="$emit('removeBook')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M5 20V10M12 20V4M19 20v-7" />
+              <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+              <path d="M10 11v6M14 11v6" />
             </svg>
-            <span>界面</span>
+            <span>移除</span>
           </button>
 
           <button class="m-grid-item" @click="openSettingsDrawer">
@@ -192,12 +193,11 @@
             <span>切换</span>
           </button>
 
-          <button class="m-grid-item" @click="$emit('removeBook')">
+          <button class="m-grid-item" :class="{ active: store.activePanel === 'settings' }" @click="store.togglePanel('settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-              <path d="M10 11v6M14 11v6" />
+              <path d="M5 20V10M12 20V4M19 20v-7" />
             </svg>
-            <span>移除</span>
+            <span>界面</span>
           </button>
         </div>
       </div>

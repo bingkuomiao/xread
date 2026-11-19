@@ -79,6 +79,15 @@ export function isExploreDefaultSource(url: string): boolean {
   return preferredSourceUrl.value === url
 }
 
+/**
+ * 获取当前发现页默认书源 URL（未设置时为 ''）。
+ * 供搜索页「单个书源」默认值复用，使搜索默认书源与发现页默认书源保持同一来源：
+ * 用户在发现页调整默认书源后，单书源搜索的默认值随之改变，无需重复设置。
+ */
+export function getExploreDefaultSourceUrl(): string {
+  return preferredSourceUrl.value
+}
+
 export const useExploreStore = defineStore('explore', () => {
   const sourceStore = useSourceStore()
 

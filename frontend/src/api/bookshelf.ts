@@ -1,25 +1,26 @@
 import http from './http'
 import type { Book, BookChapter, BookGroup } from '../types'
 import { appendAuthQueryParams } from '../utils/secureAccess'
+import { sanitizeBook, sanitizeBooks } from '../utils/cleanText'
 
 export function getBookshelf() {
-  return http.get<Book[]>('/getBookshelf').then((r) => r.data)
+  return http.get<Book[]>('/getBookshelf').then((r) => sanitizeBooks(r.data))
 }
 
 export function getBookshelfWithCacheInfo() {
-  return http.get<Book[]>('/getShelfBookWithCacheInfo').then((r) => r.data)
+  return http.get<Book[]>('/getShelfBookWithCacheInfo').then((r) => sanitizeBooks(r.data))
 }
 
 export function getShelfBook(url: string) {
-  return http.post<Book>('/getShelfBook', { url }).then((r) => r.data)
+  return http.post<Book>('/getShelfBook', { url }).then((r) => sanitizeBook(r.data))
 }
 
 export function saveBook(book: Partial<Book>) {
-  return http.post<Book>('/saveBook', book).then((r) => r.data)
+  return http.post<Book>('/saveBook', book).then((r) => sanitizeBook(r.data))
 }
 
 export function saveBooks(books: Partial<Book>[]) {
-  return http.post<Book[]>('/saveBooks', books).then((r) => r.data)
+  return http.post<Book[]>('/saveBooks', books).then((r) => sanitizeBooks(r.data))
 }
 
 export function uploadTxtBook(file: File) {
@@ -27,7 +28,7 @@ export function uploadTxtBook(file: File) {
   formData.append('file', file)
   return http.post<Book>('/uploadTxtBook', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
-  }).then((r) => r.data)
+  }).then((r) => sanitizeBook(r.data))
 }
 
 export function uploadEpubBook(file: File) {
@@ -35,7 +36,7 @@ export function uploadEpubBook(file: File) {
   formData.append('file', file)
   return http.post<Book>('/uploadEpubBook', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
-  }).then((r) => r.data)
+  }).then((r) => sanitizeBook(r.data))
 }
 
 export function deleteBook(book: Partial<Book>) {
@@ -47,7 +48,7 @@ export function deleteBooks(books: Partial<Book>[]) {
 }
 
 export function getBookInfo(url: string, origin?: string) {
-  return http.post<Book>('/getBookInfo', { url, bookSourceUrl: origin }).then((r) => r.data)
+  return http.post<Book>('/getBookInfo', { url, bookSourceUrl: origin }).then((r) => sanitizeBook(r.data))
 }
 
 export function getChapterList(params: {
@@ -102,7 +103,7 @@ export function setBookSource(params: {
   newUrl: string
   bookSourceUrl: string
 }) {
-  return http.post<Book>('/setBookSource', params).then((r) => r.data)
+  return http.post<Book>('/setBookSource', params).then((r) => sanitizeBook(r.data))
 }
 
 // ─── Cover helper ───

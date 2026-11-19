@@ -1,3 +1,5 @@
+import { ref } from 'vue'
+
 export interface DayReadingRecord {
   date: string // YYYY-MM-DD
   seconds: number
@@ -18,9 +20,33 @@ export interface ReadingStatsState {
   dailyGoalMinutes: number // 默认目标分钟数，例如 120 (2小时)
   dailyRecords: Record<string, number> // 'YYYY-MM-DD' -> seconds
   bookRecords: Record<string, BookReadingRecord> // bookUrl -> BookReadingRecord
+  // 供设置页「阅读统计」展示；本文件为唯一数据源（不兼容旧版 reader-stats）。
+  openedBooks: string[] // bookUrl 列表
+  readChapters: string[] // `${bookUrl}#${index}` 列表
+  completedBooks: string[] // bookUrl 列表
 }
 
 const STATS_STORAGE_KEY = 'xread-reading-stats-v2'
+
+// 响应式版本号：每次统计落盘自增。设置页的 computed 通过 summary 函数读取它，
+// 从而在任何写入（阅读结束/开书/读章/设置目标）后都能重算，避免显示启动快照。
+export const statsRevision = ref(0)
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
+function emptyState(): ReadingStatsState {
+  return {
+    totalSeconds: 0,
+    dailyGoalMinutes: 120,
+    dailyRecords: {},
+    bookRecords: {},
+    openedBooks: [],
+    readChapters: [],
+    completedBooks: [],
+  }
+}
 
 function getTodayKey(d = new Date()): string {
   const year = d.getFullYear()
@@ -30,6 +56,7 @@ function getTodayKey(d = new Date()): string {
 }
 
 export function loadReadingStats(): ReadingStatsState {
+  // 只读唯一数据源 xread-reading-stats-v2；不再兼容旧版 reader-stats。
   try {
     const raw = localStorage.getItem(STATS_STORAGE_KEY)
     if (raw) {
@@ -39,30 +66,15 @@ export function loadReadingStats(): ReadingStatsState {
         dailyGoalMinutes: Number(parsed.dailyGoalMinutes) || 120,
         dailyRecords: parsed.dailyRecords || {},
         bookRecords: parsed.bookRecords || {},
+        openedBooks: asStringArray(parsed.openedBooks),
+        readChapters: asStringArray(parsed.readChapters),
+        completedBooks: asStringArray(parsed.completedBooks),
       }
     }
   } catch {
     // fallback
   }
-
-  // 尝试从旧版的 reader-stats 迁移一部分数据
-  let legacyTotalSeconds = 0
-  try {
-    const legacy = localStorage.getItem('reader-stats')
-    if (legacy) {
-      const parsed = JSON.parse(legacy)
-      legacyTotalSeconds = Number(parsed.totalSeconds) || 0
-    }
-  } catch {
-    // ignore
-  }
-
-  return {
-    totalSeconds: legacyTotalSeconds,
-    dailyGoalMinutes: 120,
-    dailyRecords: {},
-    bookRecords: {},
-  }
+  return emptyState()
 }
 
 export function saveReadingStats(state: ReadingStatsState) {
@@ -71,6 +83,7 @@ export function saveReadingStats(state: ReadingStatsState) {
   } catch {
     // ignore
   }
+  statsRevision.value += 1
 }
 
 export function recordReadingTime(
@@ -112,6 +125,29 @@ export function setDailyGoal(minutes: number) {
   saveReadingStats(state)
 }
 
+export function markBookOpened(bookUrl: string) {
+  const state = loadReadingStats()
+  if (!state.openedBooks.includes(bookUrl)) {
+    state.openedBooks.push(bookUrl)
+    saveReadingStats(state)
+  }
+}
+
+export function markChapterRead(bookUrl: string, index: number, totalChapters: number) {
+  const state = loadReadingStats()
+  const key = `${bookUrl}#${index}`
+  let changed = false
+  if (!state.readChapters.includes(key)) {
+    state.readChapters.push(key)
+    changed = true
+  }
+  if (totalChapters > 0 && index >= totalChapters - 1 && !state.completedBooks.includes(bookUrl)) {
+    state.completedBooks.push(bookUrl)
+    changed = true
+  }
+  if (changed) saveReadingStats(state)
+}
+
 export function formatDuration(seconds: number): string {
   if (!seconds || seconds <= 0) return '0秒'
   const s = Math.floor(seconds % 60)
@@ -123,22 +159,20 @@ export function formatDuration(seconds: number): string {
   return `${s}秒`
 }
 
-export function formatDurationShort(seconds: number): string {
-  if (!seconds || seconds <= 0) return '0秒'
-  const m = Math.floor(seconds / 60)
-  const h = Math.floor(m / 60)
-  const remM = m % 60
-  if (h > 0) {
-    return remM > 0 ? `${h}小时${remM}分` : `${h}小时`
-  }
-  if (m > 0) {
-    const s = Math.floor(seconds % 60)
-    return s > 0 ? `${m}分${s}秒` : `${m}分钟`
-  }
-  return `${Math.floor(seconds)}秒`
+/**
+ * 累计阅读时长的统一格式化口径，供设置页与最近阅读页共用。
+ * 规则：满 1 小时显示「X小时Y分钟」，不足 1 小时按整分显示，且保底 1 分钟
+ * （即不足 1 分钟也显示「1分钟」，两处口径一致）。
+ */
+export function formatTotalTime(seconds: number): string {
+  const totalMinutes = Math.floor(seconds / 60)
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return hours ? `${hours}小时${minutes}分钟` : `${Math.max(1, totalMinutes)}分钟`
 }
 
 export function getStatsSummary() {
+  void statsRevision.value // 建立响应式依赖：统计落盘后消费方自动刷新
   const state = loadReadingStats()
   const today = getTodayKey()
   const todaySeconds = state.dailyRecords[today] || 0
@@ -173,5 +207,18 @@ export function getStatsSummary() {
     dailyGoalMinutes: state.dailyGoalMinutes,
     dailyRecords: state.dailyRecords,
     bookRecords: state.bookRecords,
+  }
+}
+
+/** 设置页「阅读统计」用的统一汇总，字段与旧版 readingStatsSummary 完全兼容。 */
+export function getUnifiedSummary() {
+  void statsRevision.value // 建立响应式依赖：统计落盘后设置页自动重算
+  const state = loadReadingStats()
+  return {
+    totalSeconds: state.totalSeconds,
+    totalTimeText: formatTotalTime(state.totalSeconds),
+    openedBooks: state.openedBooks.length,
+    readChapters: state.readChapters.length,
+    completedBooks: state.completedBooks.length,
   }
 }

@@ -1,6 +1,11 @@
 import { defineStore } from 'pinia'
 import { ref, watch, computed } from 'vue'
-import { recordReadingTime } from '../utils/readingStats'
+import {
+  recordReadingTime,
+  getUnifiedSummary,
+  markBookOpened as recordBookOpened,
+  markChapterRead as recordChapterRead,
+} from '../utils/readingStats'
 import { getUserInfo } from '../api/user'
 import { dismissVersionUpdate, getVersionUpdate } from '../api/update'
 import type { UserInfo, VersionUpdateInfo } from '../types'
@@ -8,7 +13,6 @@ import { applySystemTheme } from '../utils/systemUi'
 import { computeNeedSecureKey, readStoredSecureKey, SECURE_KEY_STORAGE_KEY } from '../utils/secureAccess'
 
 export const useAppStore = defineStore('app', () => {
-  const STATS_KEY = 'reader-stats'
   // ─── Theme ───
   const savedTheme = localStorage.getItem('theme') as 'light' | 'dark' | null
   const legacyReaderNight = localStorage.getItem('reader-isNight') === 'true'
@@ -211,25 +215,10 @@ export const useAppStore = defineStore('app', () => {
   const deferredInstallPrompt = ref<any>(null)
   const waitingServiceWorker = ref<ServiceWorker | null>(null)
 
-  const initialReadingStats = (() => {
-    try {
-      return JSON.parse(localStorage.getItem(STATS_KEY) || '{"totalSeconds":0,"openedBooks":[],"readChapters":[],"completedBooks":[]}')
-    } catch {
-      return { totalSeconds: 0, openedBooks: [], readChapters: [], completedBooks: [] }
-    }
-  })()
-
-  const readingStats = ref<{
-    totalSeconds: number
-    openedBooks: string[]
-    readChapters: string[]
-    completedBooks: string[]
-  }>(initialReadingStats)
+  // 阅读统计统一由 utils/readingStats（xread-reading-stats-v2）承载：
+  // 本 store 只保留「阅读会话计时」职责（进入/离开阅读页），计时结束把时长记入新数据源；
+  // 书籍/章节标记也转发到新数据源。此处不再单独维护 totalSeconds，避免两套数据重复累加。
   let readingSessionStartedAt = 0
-
-  function persistStats() {
-    localStorage.setItem(STATS_KEY, JSON.stringify(readingStats.value))
-  }
 
   function startReadingSession() {
     if (!readingSessionStartedAt) readingSessionStartedAt = Date.now()
@@ -238,44 +227,21 @@ export const useAppStore = defineStore('app', () => {
   function stopReadingSession(bookInfo?: { bookUrl: string; bookName: string; author?: string; coverUrl?: string; origin?: string }) {
     if (!readingSessionStartedAt) return
     const delta = Math.max(0, Math.round((Date.now() - readingSessionStartedAt) / 1000))
-    readingStats.value.totalSeconds += delta
     readingSessionStartedAt = 0
-    persistStats()
     if (delta > 0) {
       recordReadingTime(delta, bookInfo)
     }
   }
 
   function markBookOpened(bookUrl: string) {
-    if (!readingStats.value.openedBooks.includes(bookUrl)) {
-      readingStats.value.openedBooks.push(bookUrl)
-      persistStats()
-    }
+    recordBookOpened(bookUrl)
   }
 
   function markChapterRead(bookUrl: string, index: number, totalChapters: number) {
-    const key = `${bookUrl}#${index}`
-    if (!readingStats.value.readChapters.includes(key)) {
-      readingStats.value.readChapters.push(key)
-    }
-    if (totalChapters > 0 && index >= totalChapters - 1 && !readingStats.value.completedBooks.includes(bookUrl)) {
-      readingStats.value.completedBooks.push(bookUrl)
-    }
-    persistStats()
+    recordChapterRead(bookUrl, index, totalChapters)
   }
 
-  const readingStatsSummary = computed(() => {
-    const totalMinutes = Math.floor(readingStats.value.totalSeconds / 60)
-    const hours = Math.floor(totalMinutes / 60)
-    const minutes = totalMinutes % 60
-    return {
-      totalSeconds: readingStats.value.totalSeconds,
-      totalTimeText: hours ? `${hours}小时${minutes}分钟` : `${Math.max(1, totalMinutes)}分钟`,
-      openedBooks: readingStats.value.openedBooks.length,
-      readChapters: readingStats.value.readChapters.length,
-      completedBooks: readingStats.value.completedBooks.length,
-    }
-  })
+  const readingStatsSummary = computed(() => getUnifiedSummary())
 
   // ─── Toast ───
   const toasts = ref<Array<{ id: number; message: string; type: string }>>([])
@@ -335,7 +301,7 @@ export const useAppStore = defineStore('app', () => {
     sourceGroupVersion, bumpSourceGroupVersion,
     isOnline, pwaReady, pwaUpdateAvailable, deferredInstallPrompt, waitingServiceWorker,
     setOnlineStatus, setPwaReady, setPwaUpdateAvailable, setDeferredInstallPrompt, setWaitingServiceWorker, installPwa, applyPwaUpdate,
-    readingStats, readingStatsSummary, startReadingSession, stopReadingSession, markBookOpened, markChapterRead,
+    readingStatsSummary, startReadingSession, stopReadingSession, markBookOpened, markChapterRead,
     toasts, showToast,
   }
 })

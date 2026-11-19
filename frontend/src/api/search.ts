@@ -1,6 +1,7 @@
 import http from './http'
 import type { SearchBook } from '../types'
 import { appendAuthQueryParams } from '../utils/secureAccess'
+import { sanitizeBooks } from '../utils/cleanText'
 
 export function searchBookMulti(params: {
   key: string
@@ -8,7 +9,7 @@ export function searchBookMulti(params: {
   bookSourceGroup?: string
   bookSourceUrl?: string
 }) {
-  return http.post<SearchBook[]>('/searchBookMulti', params).then((r) => r.data)
+  return http.post<SearchBook[]>('/searchBookMulti', params).then((r) => sanitizeBooks(r.data))
 }
 
 /**
@@ -39,7 +40,7 @@ export function exploreBook(params: {
   bookSourceUrl: string
   page?: number
 }) {
-  return http.post<SearchBook[]>('/exploreBook', params).then((r) => r.data)
+  return http.post<SearchBook[]>('/exploreBook', params).then((r) => sanitizeBooks(r.data))
 }
 
 export function getAvailableBookSource(params: {
@@ -91,12 +92,12 @@ function normalizeAvailableBookSourceResult(
 ): AvailableBookSourceResult {
   if (Array.isArray(data)) {
     return {
-      books: data,
+      books: sanitizeBooks(data),
       lastIndex: data.length - 1,
       hasMore: false,
     }
   }
-  return data
+  return { ...data, books: sanitizeBooks(data.books) }
 }
 
 export function searchBookSourceSSE(params: {

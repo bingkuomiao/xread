@@ -14,6 +14,8 @@
       <!-- 当前书：与其他卡片共用 ReaderBookCard，仅内容不同 -->
       <ReaderBookCard
         v-if="store.book"
+        :card-bg="theme.popup"
+        :card-fg="theme.fontColor"
         :cover="briefCover"
         :title="store.book.name"
         :meta="briefMeta"
@@ -39,6 +41,8 @@
           <ReaderBookCard
             v-for="item in recommendedResults"
             :key="item.book.bookUrl + item.book.origin"
+            :card-bg="theme.popup"
+            :card-fg="theme.fontColor"
             :cover="candidateCover(item.book)"
             :title="item.book.name"
             :meta="candidateMeta(item)"
@@ -57,6 +61,8 @@
         <ReaderBookCard
           v-for="item in otherResults"
           :key="item.book.bookUrl + item.book.origin"
+          :card-bg="theme.popup"
+          :card-fg="theme.fontColor"
           :cover="candidateCover(item.book)"
           :title="item.book.name"
           :meta="candidateMeta(item)"
@@ -101,6 +107,7 @@ import { useAppStore } from '../../stores/app'
 import { useSourceStore } from '../../stores/source'
 import { getAvailableBookSourceSSE } from '../../api/search'
 import { getBookInfo, getCoverUrl } from '../../api/bookshelf'
+import { sanitizeBooks } from '../../utils/cleanText'
 import type { Book, SearchBook } from '../../types'
 
 type SourceMeta = {
@@ -457,9 +464,11 @@ function parseAvailableSourcePayload(event: MessageEvent): AvailableSourceSSEPay
 
 function applyAvailableSourcePayload(payload: AvailableSourceSSEPayload | null) {
   if (!payload) return
-  const incoming = Array.isArray(payload.data)
-    ? payload.data
-    : (Array.isArray(payload.books) ? payload.books : [])
+  const incoming = sanitizeBooks(
+    Array.isArray(payload.data)
+      ? payload.data
+      : (Array.isArray(payload.books) ? payload.books : []),
+  )
 
   if (typeof payload.lastIndex === 'number') {
     lastIndex.value = payload.lastIndex

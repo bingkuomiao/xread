@@ -196,7 +196,11 @@ function close() {
 }
 
 function isBackupFile(name: string) {
-  return name.toLowerCase().endsWith('.json')
+  const lower = name.toLowerCase()
+  // 应用生成的备份形如 reader-backup-YYYYMMDD-HHMMSS.json。
+  // 下载后再上传时，部分系统（iOS 文件 App）可能改动/丢失 .json 后缀，
+  // 因此同时按文件名前缀识别，避免重新上传的备份丢失「恢复」按钮。
+  return lower.startsWith('reader-backup-') || lower.endsWith('.json')
 }
 
 function formatSize(size: number) {

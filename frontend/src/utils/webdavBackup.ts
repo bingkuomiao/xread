@@ -15,11 +15,14 @@ import {
   saveBookSources,
 } from '../api/source'
 import type { Book, BookGroup, Bookmark, BookSource, ReplaceRule, RssSource } from '../types'
+import { sanitizeBooks } from './cleanText'
 
 const BACKUP_VERSION = 1
-const LOCAL_STORAGE_KEYS = [
+/** 供测试断言白名单覆盖；生产无其他调用。 */
+export const LOCAL_STORAGE_KEYS = [
   'theme',
-  'reader-stats',
+  // 阅读统计唯一数据源（不兼容旧版 reader-stats）。
+  'xread-reading-stats-v2',
   'readConfig',
   'reader-themeIndex',
   'reader-isNight',
@@ -27,6 +30,11 @@ const LOCAL_STORAGE_KEYS = [
   'reader-last-session',
   'reader-currentIndex',
   'reader-source-subscriptions',
+  // 界面定制（设置页「界面定制」：背景图/背景色/模糊/透明度/主题色）
+  'xread-custom-ui-theme',
+  // 搜索偏好（设置→搜索管理：精确匹配 / 默认全源搜索）
+  'xread-exact-match',
+  'xread-search-all-default',
 ]
 
 export interface WebdavBackupPayload {
@@ -44,7 +52,7 @@ export interface WebdavBackupPayload {
   localState: Record<string, string>
 }
 
-function captureLocalState() {
+export function captureLocalState() {
   return LOCAL_STORAGE_KEYS.reduce<Record<string, string>>((acc, key) => {
     const value = localStorage.getItem(key)
     if (value != null) {
@@ -54,7 +62,7 @@ function captureLocalState() {
   }, {})
 }
 
-function applyLocalState(localState: Record<string, string> = {}) {
+export function applyLocalState(localState: Record<string, string> = {}) {
   LOCAL_STORAGE_KEYS.forEach((key) => {
     const value = localState[key]
     if (value == null) {
@@ -108,7 +116,7 @@ export function parseWebdavBackup(raw: string) {
     createdAt: payload.createdAt || new Date().toISOString(),
     app: payload.app || 'reader-rust-frontend',
     bookshelf: {
-      books: payload.bookshelf.books || [],
+      books: sanitizeBooks(payload.bookshelf.books),
       groups: payload.bookshelf.groups || [],
     },
     bookSources: payload.bookSources || [],

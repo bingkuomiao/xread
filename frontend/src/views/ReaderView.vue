@@ -436,6 +436,9 @@ let pendingRestoreAttempts = 0
 let suppressPositionSaveUntil = 0
 let suppressContinuousScrollSyncUntil = 0
 let suppressContinuousAutoLoadUntil = 0
+// 连续滚动停止后的末行吸附：定时器 + 抑制标志（避免吸附动作自身/程序化滚动互相触发）
+let scrollSnapTimer: number | null = null
+let suppressScrollSnapUntil = 0
 const restoreStabilizeTimers: number[] = []
 const serverProgressAutoSaveScheduler = createReaderProgressAutoSaveScheduler({
   intervalMs: SERVER_PROGRESS_AUTOSAVE_MS,
@@ -1225,6 +1228,58 @@ function bottomSafeLanding(lineTops: number[], target: number, vh: number, curTo
 }
 
 /**
+ * 连续滚动「自由滑动停止后」的末行吸附。
+ * 点击翻页走 snapPageTarget，末行本就完整；但手指自由滑动会把 scrollTop 停在任意像素，
+ * 导致底部最后一行被从中间截断（只显示上半部分）。这里在滚动停止后做一次温柔的微调：
+ * 若当前落点不在「末行完整」的行间隙，就吸附到最近的安全落点。
+ * - 只处理连续模式、非自动播放、非位置恢复/程序化滚动期间；
+ * - 吸附自身会再次触发 scroll，用 suppressScrollSnapUntil 抑制，避免来回抖动；
+ * - 用 smooth 过渡 + 限制最大位移，避免长距离跳动影响阅读手感。
+ */
+function snapContinuousScrollToSafeLine() {
+  const container = scrollContainerRef.value
+  if (!container || !isContinuousMode.value) return
+  // 自动播放、位置恢复/程序化滚动期间不吸附，避免打架
+  if (store.isAutoScrolling || Date.now() < suppressContinuousScrollSyncUntil) return
+  if (Date.now() < suppressScrollSnapUntil) return
+
+  const lineTops = collectLineTops(container)
+  if (lineTops.length < 2) return
+  const vh = container.clientHeight
+  const curTop = container.scrollTop
+  const maxScroll = Math.max(0, container.scrollHeight - vh)
+  // 顶部/底部（含接近切章区间）不吸附，避免干扰加载与切章
+  if (curTop <= 2 || curTop >= maxScroll - 2) return
+
+  const pitch = Math.max(1, config.value.fontSize * config.value.lineHeight)
+  const bottom = curTop + vh
+  // 视口底部下方最近的行顶；gap 越小说明底部越贴近行间隙，末行越完整
+  let nextLineTop = Infinity
+  for (const t of lineTops) {
+    if (t >= bottom) { nextLineTop = t; break }
+  }
+  if (!Number.isFinite(nextLineTop)) return
+  const gap = nextLineTop - bottom
+  // 已经落在行间隙附近（末行完整）则不动；容差 3px 避免像素抖动
+  if (gap <= 3) return
+
+  // 目标落点：让该行顶对齐视口底部（即 scrollTop += gap），末行完整显示。
+  // 位移过大（超过两行，通常是段落大间距/章节切换）时放弃，避免明显跳动。
+  const target = Math.min(maxScroll, curTop + gap)
+  if (target - curTop > pitch * 2) return
+  suppressScrollSnapUntil = Date.now() + 600
+  container.scrollTo({ top: target, behavior: 'smooth' })
+}
+
+function scheduleScrollSnap() {
+  if (scrollSnapTimer) clearTimeout(scrollSnapTimer)
+  scrollSnapTimer = window.setTimeout(() => {
+    scrollSnapTimer = null
+    snapContinuousScrollToSafeLine()
+  }, 200)
+}
+
+/**
  * 翻页落点：让章节标题另起一页、且首末行都完整。
  * 1) 章节标题：凡是落在当前视口下半部、或紧随其后一屏内的标题，都直接吸附到它的顶部，
  *    让新章节从页首开始（标题在新的一页），避免标题卡在页尾。
@@ -1279,6 +1334,8 @@ function pageForward() {
   if (!container) return
   // 媒体播放页不允许翻页切集（避免误触）
   if (mediaContent.value) return
+  // 点击翻页落点已经过 snapPageTarget 对齐末行，抑制自由滚动吸附避免二次抖动
+  suppressScrollSnapUntil = Date.now() + 500
   if (isHorizontalPageMode.value) {
     const maxPage = Math.max(0, horizontalPages.value.length - 1)
     if (horizontalPageIndex.value >= maxPage) {
@@ -1304,6 +1361,8 @@ function pageBackward() {
   if (!container) return
   // 媒体播放页不允许翻页切集（避免误触）
   if (mediaContent.value) return
+  // 点击翻页落点已经过 snapPageTarget 对齐末行，抑制自由滚动吸附避免二次抖动
+  suppressScrollSnapUntil = Date.now() + 500
   if (isHorizontalPageMode.value) {
     if (horizontalPageIndex.value <= 0) {
       prevChapter()
@@ -1813,6 +1872,11 @@ const {
   prevChapter,
 )
 
+// 点击正文唤出控制面板的中间区域（按屏幕高度比例）。
+// 收窄为 0.4~0.6（原 0.3~0.7），避免屏幕下半部点击正文时误触唤出菜单。
+const MENU_ZONE_TOP = 0.4
+const MENU_ZONE_BOTTOM = 0.6
+
 // Click behavior
 function handleBackgroundClick(e: Event) {
   // If clicked directly on the reader-view wrapper, toggle controls
@@ -1861,9 +1925,9 @@ function handleGlobalClick(e: MouseEvent) {
     }
   } else {
     const y = e.clientY / window.innerHeight
-    if (y < 0.3) {
+    if (y < MENU_ZONE_TOP) {
       clickZoneAction('prev')
-    } else if (y > 0.7) {
+    } else if (y > MENU_ZONE_BOTTOM) {
       clickZoneAction('next')
     } else {
       clickZoneAction('menu')
@@ -1958,6 +2022,8 @@ function handleScroll() {
     if (Date.now() >= suppressContinuousAutoLoadUntil && container.scrollHeight - (container.scrollTop + container.clientHeight) < 480) {
       loadContinuousNext()
     }
+    // 手指自由滑动停止后，把末行吸附到整行边界，避免底部文字被从中间截断
+    scheduleScrollSnap()
   } else if (container) {
     const maxScroll = Math.max(1, container.scrollHeight - container.clientHeight)
     const progress = isHorizontalPageMode.value
@@ -2283,6 +2349,7 @@ onUnmounted(() => {
   if (speechTimerTicker) clearInterval(speechTimerTicker)
   if (restorePositionTimer) clearTimeout(restorePositionTimer)
   if (persistPositionTimer) clearTimeout(persistPositionTimer)
+  if (scrollSnapTimer) clearTimeout(scrollSnapTimer)
   if (refreshOfflineCacheStateTimer) clearTimeout(refreshOfflineCacheStateTimer)
   clearRestoreStabilizers()
   disposeSelection()
@@ -2586,7 +2653,7 @@ watch(
 }
 
 .chapter-title {
-  font-size: 1.6em;
+  font-size: 1.35em;
   font-weight: 700;
   margin-bottom: 2em;
   text-align: center;
