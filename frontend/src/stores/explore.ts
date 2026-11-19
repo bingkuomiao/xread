@@ -79,6 +79,15 @@ export function isExploreDefaultSource(url: string): boolean {
   return preferredSourceUrl.value === url
 }
 
+/**
+ * 获取当前发现页默认书源 URL（未设置时为 ''）。
+ * 供搜索页「单个书源」默认值复用，使搜索默认书源与发现页默认书源保持同一来源：
+ * 用户在发现页调整默认书源后，单书源搜索的默认值随之改变，无需重复设置。
+ */
+export function getExploreDefaultSourceUrl(): string {
+  return preferredSourceUrl.value
+}
+
 export const useExploreStore = defineStore('explore', () => {
   const sourceStore = useSourceStore()
 
@@ -427,7 +436,7 @@ export const useExploreStore = defineStore('explore', () => {
       // 期间已有更新（用户切走又切回，或缓存被新写入）：放弃本次后台结果，避免回滚。
       const cur = booksCache.get(booksCacheKey())
       if (cur && cur.ts !== fetchedAt) return
-      // 仅当用户仍停在第 1 页（page===2，尚未滚动翻页）时才用新数据替换展示；
+      // 仅当用户仍停在第 1 页（page===2，尚未滚动翻页）时才用新数据替换；
       // 若用户已滚到后续页，直接替换会把已加载的多页书单截断、下次翻页跳号，故跳过。
       // 缓存仍照常更新，保证下次重新进入发现页拿到的是新首页。
       if (page.value === 2 && result && result.length > 0) {
