@@ -11,6 +11,8 @@
       <ReaderBookCard
         v-for="book in store.books"
         :key="book.bookUrl"
+        :card-bg="theme.popup"
+        :card-fg="theme.fontColor"
         :cover="getCoverUrl(book.coverUrl)"
         :title="book.name"
         :meta="bookMeta(book)"
