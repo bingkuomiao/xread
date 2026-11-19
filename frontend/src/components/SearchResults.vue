@@ -88,8 +88,10 @@ import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { useSourceStore } from '../stores/source'
+import { getExploreDefaultSourceUrl } from '../stores/explore'
 import { searchBookMultiSSE } from '../api/search'
 import { saveBook } from '../api/bookshelf'
+import { sanitizeBooks } from '../utils/cleanText'
 import BookGrid from './BookGrid.vue'
 import BookDetailModal from './BookDetailModal.vue'
 import type { Book, SearchBook } from '../types'
@@ -252,7 +254,15 @@ function ensureSearchSelection() {
   if (searchScope.value === 'source') {
     const selectedSourceStillValid = sourceOptions.value.some((source) => source.bookSourceUrl === selectedSourceUrl.value)
     if (!selectedSourceStillValid && sourceOptions.value.length > 0) {
-      selectedSourceUrl.value = sourceOptions.value[0].bookSourceUrl
+      // 单书源搜索的默认书源与发现页默认书源保持一致：
+      // 优先采用发现页默认源（若仍在可用列表中），否则回退到排序第一个。
+      // 用 URL 比对而非直接赋值，确保下拉框绑定的是列表中真实存在的选项。
+      const exploreDefault = getExploreDefaultSourceUrl()
+      const exploreDefaultStillValid = exploreDefault &&
+        sourceOptions.value.some((source) => source.bookSourceUrl === exploreDefault)
+      selectedSourceUrl.value = exploreDefaultStillValid
+        ? exploreDefault
+        : sourceOptions.value[0].bookSourceUrl
     }
   }
 }
@@ -285,8 +295,12 @@ function doSearch(rawKey: string) {
   shelfStore.searchResults = []
   shelfStore.isSearching = true
 
+  // x:/m:/t:/d: 是 XRead 前端的内部分类标记，后端与书源都不识别它。
+  // 若把前缀原样下发，书源的 {{key}} 会把它拼进真实搜索 URL（如
+  // searchkey=x:甲木仙经），部分站点把它当无效查询而返回空/默认榜单，导致搜不到书。
+  // 分类只决定前端 UI 与搜索范围（searchScope），不参与书源检索，故下发前剥离前缀。
   eventSource = searchBookMultiSSE({
-    key: finalKey,
+    key: plainKeyword(finalKey),
     concurrentCount: 24,
     bookSourceGroup: searchScope.value === 'group' ? selectedGroup.value : undefined,
     bookSourceUrl: searchScope.value === 'source' ? selectedSourceUrl.value : undefined,
@@ -299,7 +313,9 @@ function doSearch(rawKey: string) {
       const data = JSON.parse(event.data)
       if (data.data && Array.isArray(data.data)) {
         const existing = new Set(shelfStore.searchResults.map((r) => `${r.origin}::${r.bookUrl}`))
-        const newBooks = data.data.filter((b: SearchBook) => !existing.has(`${b.origin}::${b.bookUrl}`))
+        const newBooks = sanitizeBooks(
+          (data.data as SearchBook[]).filter((b) => !existing.has(`${b.origin}::${b.bookUrl}`)),
+        )
         // 每收到一批就按相关性重排，精确结果始终置顶，不必等全部搜完
         shelfStore.searchResults = sortByRelevance(
           [...shelfStore.searchResults, ...newBooks],

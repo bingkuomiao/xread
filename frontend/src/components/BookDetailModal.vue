@@ -137,22 +137,8 @@ const displayChapters = computed(() => {
   return chapters.value.slice(0, 50)
 })
 
-// 书源返回的简介常包裹 HTML（如 <div class="content-intro">、<p class="detail-btn">），
-// 直接显示会把标签当纯文本。这里先还原字面量转义字符（如反斜杠 n/r/t），
-// 再剥掉标签、压缩空白，<br> 与块级标签转成换行后保留为纯文本。
-const plainIntro = computed(() => {
-  const src = props.book?.intro
-  if (!src) return ''
-  const raw = src.replace(/\\n|\\r/g, '\n').replace(/\\t/g, ' ')
-  return raw
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|li|h[1-6])>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-})
+// 书籍数据已在入口统一清洗（intro 保留换行），这里直接显示即可。
+const plainIntro = computed(() => props.book?.intro || '')
 
 watch(() => props.modelValue, async (visible) => {
   if (visible && props.book) {
