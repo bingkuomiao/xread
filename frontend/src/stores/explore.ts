@@ -436,7 +436,7 @@ export const useExploreStore = defineStore('explore', () => {
       // 期间已有更新（用户切走又切回，或缓存被新写入）：放弃本次后台结果，避免回滚。
       const cur = booksCache.get(booksCacheKey())
       if (cur && cur.ts !== fetchedAt) return
-      // 仅当用户仍停在第 1 页（page===2，尚未滚动翻页）时才用新数据替换；
+      // 仅当用户仍停在第 1 页（page===2，尚未滚动翻页）时才用新数据替换展示；
       // 若用户已滚到后续页，直接替换会把已加载的多页书单截断、下次翻页跳号，故跳过。
       // 缓存仍照常更新，保证下次重新进入发现页拿到的是新首页。
       if (page.value === 2 && result && result.length > 0) {
