@@ -253,8 +253,12 @@ async function loadFiles(path = '/') {
         }]
       : []
     rows.push(...list.sort((a, b) => {
+      // 目录始终排在文件前面，目录之间仍按名称升序
       if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-      return a.name.localeCompare(b.name)
+      if (a.isDirectory) return a.name.localeCompare(b.name)
+      // 文件按修改时间倒序，最新的排在最上面；时间相同时按文件名倒序兜底
+      if (a.lastModified !== b.lastModified) return b.lastModified - a.lastModified
+      return b.name.localeCompare(a.name)
     }))
     entries.value = rows
   } catch (error) {
