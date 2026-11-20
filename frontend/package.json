@@ -1,7 +1,7 @@
 {
   "name": "xread-frontend",
   "private": true,
-  "version": "1.0.48.113",
+  "version": "1.0.48.140",
   "type": "module",
   "scripts": {
     "dev": "vite",
