@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useBookshelfStore } from './bookshelf'
-import { getBookshelfWithCacheInfo } from '../api/bookshelf'
+import { getBookshelfWithCacheInfo, saveBook, saveBooks } from '../api/bookshelf'
 import { listBrowserCacheSummary } from '../utils/browserCache'
 
 vi.mock('../api/bookshelf', () => ({
@@ -9,10 +9,11 @@ vi.mock('../api/bookshelf', () => ({
   getBookGroups: vi.fn(),
   deleteBook: vi.fn(),
   deleteBooks: vi.fn(),
+  saveBook: vi.fn(),
+  saveBooks: vi.fn(),
   saveBookGroupId: vi.fn(),
   saveBookGroup: vi.fn(),
   deleteBookGroup: vi.fn(),
-  saveBooks: vi.fn(),
 }))
 
 vi.mock('../utils/browserCache', () => ({
@@ -82,5 +83,29 @@ describe('bookshelf search state', () => {
     expect(store.searchKey).toBe('星门')
     expect(store.searchScope).toBe('source')
     expect(store.searchSourceUrl).toBe('https://m.cuoceng.com')
+  })
+
+  it('places the newly added book at the front of the shelf', async () => {
+    const existing = [
+      { name: '旧书A', author: '甲', origin: 'src', bookUrl: 'https://b.example/a' },
+      { name: '旧书B', author: '乙', origin: 'src', bookUrl: 'https://b.example/b' },
+    ]
+    const newBook = { name: '新书', author: '丙', origin: 'src', bookUrl: 'https://b.example/new' }
+    vi.mocked(saveBook).mockResolvedValue({ ...newBook } as never)
+    // 后端把新书 push 到末尾后返回
+    vi.mocked(getBookshelfWithCacheInfo).mockResolvedValue([...existing, newBook] as never)
+
+    const store = useBookshelfStore()
+    await store.addToShelf(newBook)
+
+    expect(store.books.map((b) => b.bookUrl)).toEqual([
+      'https://b.example/new',
+      'https://b.example/a',
+      'https://b.example/b',
+    ])
+    // 置顶后的顺序需写回服务端，保证跨设备一致
+    expect(saveBooks).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ bookUrl: 'https://b.example/new' })]),
+    )
   })
 })

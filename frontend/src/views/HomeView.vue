@@ -187,6 +187,10 @@ async function handleLocalBookFileChange(event: Event) {
       ? await uploadEpubBook(file)
       : await uploadTxtBook(file)
     await shelfStore.fetchBooks()
+    // 新导入的本地书同样置顶
+    if (book?.bookUrl) {
+      await shelfStore.moveBookToFront(book.bookUrl, book.origin).catch(() => undefined)
+    }
     appStore.showToast(`已导入《${book.name}》`, 'success')
     await handleBookClick(book)
   } catch (e: unknown) {

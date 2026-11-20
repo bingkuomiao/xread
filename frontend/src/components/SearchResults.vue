@@ -90,7 +90,6 @@ import { useAppStore } from '../stores/app'
 import { useSourceStore } from '../stores/source'
 import { getExploreDefaultSourceUrl } from '../stores/explore'
 import { searchBookMultiSSE } from '../api/search'
-import { saveBook } from '../api/bookshelf'
 import { sanitizeBooks } from '../utils/cleanText'
 import BookGrid from './BookGrid.vue'
 import BookDetailModal from './BookDetailModal.vue'
@@ -387,7 +386,7 @@ function handleBookInfo(book: Book | SearchBook) {
 
 async function handleAddToShelf(book: Book | SearchBook) {
   try {
-    await saveBook({
+    await shelfStore.addToShelf({
       name: book.name,
       author: book.author,
       bookUrl: book.bookUrl,
@@ -395,7 +394,6 @@ async function handleAddToShelf(book: Book | SearchBook) {
       coverUrl: book.coverUrl,
     })
     appStore.showToast(`"${book.name}" 已加入书架`, 'success')
-    shelfStore.fetchBooks()
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')
   }

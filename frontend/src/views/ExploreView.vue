@@ -100,7 +100,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useExploreStore } from '../stores/explore'
 import { useReaderStore } from '../stores/reader'
-import { saveBook } from '../api/bookshelf'
+import { useBookshelfStore } from '../stores/bookshelf'
 import { fetchExploreSourcePreference } from '../api/user'
 import { useAppStore } from '../stores/app'
 import BookGrid from '../components/BookGrid.vue'
@@ -110,6 +110,7 @@ import type { Book, SearchBook, ExploreKind } from '../types'
 const store = useExploreStore()
 const readerStore = useReaderStore()
 const appStore = useAppStore()
+const shelfStore = useBookshelfStore()
 const router = useRouter()
 
 const scrollContainer = ref<HTMLElement>()
@@ -286,7 +287,7 @@ async function handleBookClick(book: Book | SearchBook) {
 
 async function handleAddToShelf(book: Book | SearchBook) {
   try {
-    await saveBook({
+    await shelfStore.addToShelf({
       name: book.name,
       author: book.author,
       bookUrl: book.bookUrl,

@@ -8,6 +8,7 @@ import {
   saveBookGroupId as apiSaveBookGroupId,
   saveBookGroup as apiSaveBookGroup,
   deleteBookGroup as apiDeleteBookGroup,
+  saveBook as apiSaveBook,
   saveBooks as apiSaveBooks,
 } from '../api/bookshelf'
 import type { Book, BookGroup, SearchBook } from '../types'
@@ -253,11 +254,13 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     }
   }
 
-  async function moveBookToFront(bookUrl: string) {
+  async function moveBookToFront(bookUrl: string, origin?: string) {
     if (!bookUrl || books.value.length <= 1) return
 
     const snapshot = books.value.slice()
-    const fromIndex = snapshot.findIndex((book) => book.bookUrl === bookUrl)
+    const fromIndex = snapshot.findIndex(
+      (book) => book.bookUrl === bookUrl && (origin === undefined || book.origin === origin)
+    )
     if (fromIndex <= 0) return
 
     const next = snapshot.slice()
@@ -276,6 +279,17 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     }
   }
 
+  // 加入书架：先保存，再把新加入的书移动到最前面（新书置顶）。
+  // 已存在的书重复加入时同样置顶；置顶顺序会写回服务端，跨设备一致。
+  async function addToShelf(book: Partial<Book>) {
+    const saved = await apiSaveBook(book)
+    // 后端把新书 push 到末尾，fetch 后新书在数组最后；再置顶并写回
+    await fetchBooks()
+    if (saved?.bookUrl) {
+      await moveBookToFront(saved.bookUrl, saved.origin)
+    }
+  }
+
   return {
     books, recentBooks, loading, refreshing, sorting,
     fetchBooks, refreshBooks, removeBook,
@@ -286,6 +300,6 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     searchScope, searchCategory, searchGroup, searchSourceUrl, searchSourcePinned, pinSearchSource, startSearch, clearSearch, isSearchMode,
     editMode,
     selectedBookUrls, toggleSelection, selectAll, clearSelection,
-    bulkDelete, bulkSetGroup, reorderBooks, moveBookToFront,
+    bulkDelete, bulkSetGroup, reorderBooks, moveBookToFront, addToShelf,
   }
 })
