@@ -47,6 +47,7 @@
             @toggle-current-selection="toggleFilteredSelection"
             @clear-selection="clearSelection"
             @delete-selection="removeSelectedSources"
+            @clear-compat-marks="clearSelectedCompatMarks"
           />
 
           <div class="content-grid">
@@ -175,6 +176,7 @@ import {
   SOURCE_GROUP_INVALID,
   toBookSourceDeletePayload,
 } from '../utils/sourceSelection'
+import { applyDeepGroup } from '../utils/sourceCompatibility'
 import { appendAuthQueryParams } from '../utils/secureAccess'
 import {
   chunkBookSourceUrls,
@@ -398,6 +400,44 @@ async function removeSelectedSources() {
     appStore.showToast(`已删除 ${targets.length} 个书源`, 'success')
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '批量删除失败', 'error')
+  }
+}
+
+/**
+ * 取消选中书源的兼容标记（需留意 / 不兼容），保留其余分组不变。
+ * 只改 bookSourceGroup，不触碰书源其它字段；写回服务端后同步本地镜像，
+ * 并自增分组版本号让弹窗/管理页的分组下拉同步刷新。
+ */
+async function clearSelectedCompatMarks() {
+  const targets = selectedFilteredSources.value
+  if (!targets.length) {
+    appStore.showToast('请先选择要取消标记的书源', 'warning')
+    return
+  }
+  // 仅对确实带「需留意 / 不兼容」标记的书源发起写回
+  const marked = targets.filter(
+    (source) => applyDeepGroup(source.bookSourceGroup || '', null) !== (source.bookSourceGroup || ''),
+  )
+  const toUpdate: BookSource[] = marked.map((source) => ({
+    ...source,
+    bookSourceGroup: applyDeepGroup(source.bookSourceGroup || '', null),
+  }))
+  if (!toUpdate.length) {
+    appStore.showToast('选中的书源没有兼容标记', 'warning')
+    return
+  }
+  try {
+    await saveBookSources(toUpdate)
+    const groups = new Map(toUpdate.map((s) => [s.bookSourceUrl, s.bookSourceGroup]))
+    sources.value = sources.value.map((source) =>
+      groups.has(source.bookSourceUrl)
+        ? { ...source, bookSourceGroup: groups.get(source.bookSourceUrl) }
+        : source,
+    )
+    appStore.bumpSourceGroupVersion()
+    appStore.showToast(`已取消 ${toUpdate.length} 个书源的兼容标记`, 'success')
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '取消标记失败', 'error')
   }
 }
 

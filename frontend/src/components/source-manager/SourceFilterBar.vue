@@ -45,6 +45,7 @@
         <span>已选 {{ selectedCount }}</span>
         <button class="mini-btn" type="button" @click="$emit('clear-selection')">清空</button>
         <button class="mini-btn danger" type="button" @click="$emit('delete-selection')">删除选中</button>
+        <button class="mini-btn" type="button" @click="$emit('clear-compat-marks')">取消选中</button>
       </div>
     </section>
   </div>
@@ -70,6 +71,7 @@ defineEmits<{
   'toggle-current-selection': []
   'clear-selection': []
   'delete-selection': []
+  'clear-compat-marks': []
 }>()
 
 // 选中标记分组时，让闭合态下拉框跟着变色（下拉自身样式，不新增控件）
