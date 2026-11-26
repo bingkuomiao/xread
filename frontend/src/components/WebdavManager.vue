@@ -97,6 +97,14 @@
                     恢复
                   </button>
                   <button
+                    v-if="!entry.isDirectory && isBackupFile(entry.name)"
+                    class="mini-btn"
+                    :disabled="working"
+                    @click="mergeBackup(entry)"
+                  >
+                    合并
+                  </button>
+                  <button
                     v-if="!entry.isDirectory"
                     class="mini-btn"
                     :disabled="working"
@@ -137,6 +145,7 @@ import {
 } from '../api/webdav'
 import {
   createWebdavBackupPayload,
+  mergeWebdavBackup,
   parseWebdavBackup,
   restoreWebdavBackup,
   serializeWebdavBackup,
@@ -196,7 +205,11 @@ function close() {
 }
 
 function isBackupFile(name: string) {
-  return name.toLowerCase().endsWith('.json')
+  const lower = name.toLowerCase()
+  // 应用生成的备份形如 reader-backup-YYYYMMDD-HHMMSS.json。
+  // 下载后再上传时，部分系统（iOS 文件 App）可能改动/丢失 .json 后缀，
+  // 因此同时按文件名前缀识别，避免重新上传的备份丢失「恢复」按钮。
+  return lower.startsWith('reader-backup-') || lower.endsWith('.json')
 }
 
 function formatSize(size: number) {
@@ -249,8 +262,12 @@ async function loadFiles(path = '/') {
         }]
       : []
     rows.push(...list.sort((a, b) => {
+      // 目录始终排在文件前面，目录之间仍按名称升序
       if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-      return a.name.localeCompare(b.name)
+      if (a.isDirectory) return a.name.localeCompare(b.name)
+      // 文件按修改时间倒序，最新的排在最上面；时间相同时按文件名倒序兜底
+      if (a.lastModified !== b.lastModified) return b.lastModified - a.lastModified
+      return b.name.localeCompare(a.name)
     }))
     entries.value = rows
   } catch (error) {
@@ -379,6 +396,26 @@ async function restoreBackup(entry: EntryRow) {
     }, 800)
   } catch (error) {
     appStore.showToast((error as Error).message || '恢复失败', 'error')
+    working.value = false
+  }
+}
+
+async function mergeBackup(entry: EntryRow) {
+  if (!confirm(`确定从 ${entry.name} 合并数据吗？这会把备份中的书籍、书源、RSS、书签等并入当前数据：相同书籍取阅读进度较新的版本，不会删除当前已有的书籍。`)) {
+    return
+  }
+
+  working.value = true
+  try {
+    const raw = await getWebdavFileText(entry.path)
+    const payload = parseWebdavBackup(raw)
+    await mergeWebdavBackup(payload)
+    appStore.showToast('合并完成，正在刷新页面', 'success')
+    window.setTimeout(() => {
+      window.location.reload()
+    }, 800)
+  } catch (error) {
+    appStore.showToast((error as Error).message || '合并失败', 'error')
     working.value = false
   }
 }

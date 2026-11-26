@@ -35,6 +35,11 @@ export function uploadFilesToWebdav(files: Array<{ file: Blob; name: string }>, 
   files.forEach((item, index) => {
     formData.append(`file${index}`, item.file, item.name)
   })
+  // 必须显式设置 multipart/form-data 覆盖 http 实例的默认 application/json：
+  // 全局 http 实例设了 Content-Type: application/json，若不覆盖，axios transformRequest
+  // 检测到 JSON 类型会把 FormData 序列化成 JSON 字符串，后端 axum 的 Multipart extractor
+  // 无法解析而直接返回 400（备份/上传都会中招，下载是 GET 不受影响）。
+  // 这里与 uploadTxtBook/uploadEpubBook/readSourceFile 保持一致，显式声明 multipart。
   return http.post<WebdavFileEntry[]>('/uploadFileToWebdav', formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
