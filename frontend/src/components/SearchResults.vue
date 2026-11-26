@@ -5,7 +5,7 @@
         搜索 "{{ searchKey }}"
         <span v-if="isSearching" class="searching-indicator">
           <span class="dot-pulse"></span>
-          搜索中...
+          {{ appStore.exactMatch ? '精确搜索中...' : '搜索中...' }}
         </span>
         <span v-else class="result-count">
           ({{ displayResults.length }} 个结果<template v-if="!appStore.exactMatch && exactMatchCount > 0">，{{ exactMatchCount }} 个匹配</template><template v-else-if="appStore.exactMatch">，已精确匹配</template>)
@@ -25,7 +25,7 @@
           type="button"
           class="filter-tab"
           :class="{ active: searchScope === 'all' }"
-          @click="searchScope = 'all'"
+          @click="setSearchScope('all')"
         >
           全部书源
         </button>
@@ -33,7 +33,7 @@
           type="button"
           class="filter-tab"
           :class="{ active: searchScope === 'group' }"
-          @click="searchScope = 'group'"
+          @click="setSearchScope('group')"
         >
           按分组
         </button>
@@ -41,14 +41,14 @@
           type="button"
           class="filter-tab"
           :class="{ active: searchScope === 'source' }"
-          @click="searchScope = 'source'"
+          @click="setSearchScope('source')"
         >
           单个书源
         </button>
       </div>
 
       <div v-if="searchScope === 'group'" class="filter-select-wrap">
-        <select v-model="selectedGroup" class="filter-select">
+        <select v-model="selectedGroup" class="filter-select" @change="shelfStore.pinSearchSource()">
           <option v-for="group in sourceGroups" :key="group" :value="group">
             {{ group }}
           </option>
@@ -56,7 +56,7 @@
       </div>
 
       <div v-else-if="searchScope === 'source'" class="filter-select-wrap">
-        <select v-model="selectedSourceUrl" class="filter-select">
+        <select v-model="selectedSourceUrl" class="filter-select" @change="shelfStore.pinSearchSource()">
           <option v-for="source in sourceOptions" :key="source.bookSourceUrl" :value="source.bookSourceUrl">
             {{ source.bookSourceName }}
           </option>
@@ -88,8 +88,10 @@ import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { useSourceStore } from '../stores/source'
+import { getExploreDefaultSourceUrl } from '../stores/explore'
 import { searchBookMultiSSE } from '../api/search'
-import { saveBook } from '../api/bookshelf'
+import { sanitizeBooks } from '../utils/cleanText'
+import { unifySearchCovers } from '../utils/searchCover'
 import BookGrid from './BookGrid.vue'
 import BookDetailModal from './BookDetailModal.vue'
 import type { Book, SearchBook } from '../types'
@@ -145,14 +147,19 @@ const sourceOptions = computed(() => {
 })
 
 const displayResults = computed<SearchBook[]>(() => {
-  let list = results.value.map((book) => {
-    const source = sourceByUrl.value.get(book.origin)
-    return {
-      ...book,
-      originName: book.originName || source?.bookSourceName || book.origin,
-      originGroup: book.originGroup || source?.bookSourceGroup,
-    }
-  })
+  // 过滤书源解析失败产生的无效结果：书名或链接为空时既无法阅读也无法加入书架。
+  // 这类脏数据的 bookUrl 也为空，导致列表 key（origin::bookUrl）全部相同，
+  // TransitionGroup 因此出现「0 结果却仍残留一堆无书名卡片」的渲染异常。
+  let list = results.value
+    .filter((book) => !!(book.name || '').trim() && !!(book.bookUrl || '').trim())
+    .map((book) => {
+      const source = sourceByUrl.value.get(book.origin)
+      return {
+        ...book,
+        originName: book.originName || source?.bookSourceName || book.origin,
+        originGroup: book.originGroup || source?.bookSourceGroup,
+      }
+    })
 
   // 精确匹配：仅保留书名（或作者）与关键词完全一致（忽略大小写与首尾空白）的条目。
   // 开关为全局设置（stores/app 的 exactMatch），在「设置 → 搜索管理」中控制。
@@ -167,7 +174,9 @@ const displayResults = computed<SearchBook[]>(() => {
     }
   }
 
-  return list
+  // 同一本书的多个书源结果封面质量不一：有的缺封面、有的抓错图（串成别的书）。
+  // 统一为组内第一个有效封面（列表已按相关性排序，质量高的书源在前），避免占位/错图。
+  return unifySearchCovers(list)
 })
 
 /** 去掉搜索模式前缀（x:/m:/t:/d:），得到用户真正输入的关键词。 */
@@ -232,6 +241,11 @@ function closeEventSource() {
   }
 }
 
+function setSearchScope(scope: 'all' | 'group' | 'source') {
+  searchScope.value = scope
+  shelfStore.pinSearchSource()
+}
+
 function ensureSearchSelection() {
   if (searchScope.value === 'group') {
     const selectedGroupStillValid = selectedGroup.value && sourceGroups.value.includes(selectedGroup.value)
@@ -242,7 +256,15 @@ function ensureSearchSelection() {
   if (searchScope.value === 'source') {
     const selectedSourceStillValid = sourceOptions.value.some((source) => source.bookSourceUrl === selectedSourceUrl.value)
     if (!selectedSourceStillValid && sourceOptions.value.length > 0) {
-      selectedSourceUrl.value = sourceOptions.value[0].bookSourceUrl
+      // 单书源搜索的默认书源与发现页默认书源保持一致：
+      // 优先采用发现页默认源（若仍在可用列表中），否则回退到排序第一个。
+      // 用 URL 比对而非直接赋值，确保下拉框绑定的是列表中真实存在的选项。
+      const exploreDefault = getExploreDefaultSourceUrl()
+      const exploreDefaultStillValid = exploreDefault &&
+        sourceOptions.value.some((source) => source.bookSourceUrl === exploreDefault)
+      selectedSourceUrl.value = exploreDefaultStillValid
+        ? exploreDefault
+        : sourceOptions.value[0].bookSourceUrl
     }
   }
 }
@@ -262,21 +284,21 @@ function doSearch(rawKey: string) {
     return
   }
 
-  let finalKey = rawKey.trim()
-  const cat = searchCategory.value
-  const hasPrefix = /^[xmtdXMTD][:：]/.test(finalKey)
-  if (!hasPrefix) {
-    if (cat === 'manga') finalKey = 'm:' + finalKey
-    else if (cat === 'audio') finalKey = 't:' + finalKey
-    else if (cat === 'skit') finalKey = 'd:' + finalKey
-    else if (cat === 'novel') finalKey = 'x:' + finalKey
-  }
+  // 搜索分类下拉已改为书架用户自定义分组（与横向分类同源），仅作 UI 标记。
+  // 旧版 novel/manga/audio/skit → x:/m:/t:/d: 的自动前缀已废弃：这些前缀在
+  // 下发书源与相关性排序时都会被 plainKeyword 剥离，本就不影响检索，故不再自动生成。
+  // 用户仍可手动输入 x:/m:/t:/d: 前缀，plainKeyword 会照常识别。
+  const finalKey = rawKey.trim()
 
   shelfStore.searchResults = []
   shelfStore.isSearching = true
 
+  // x:/m:/t:/d: 是 XRead 前端的内部分类标记，后端与书源都不识别它。
+  // 若把前缀原样下发，书源的 {{key}} 会把它拼进真实搜索 URL（如
+  // searchkey=x:甲木仙经），部分站点把它当无效查询而返回空/默认榜单，导致搜不到书。
+  // 分类只决定前端 UI 与搜索范围（searchScope），不参与书源检索，故下发前剥离前缀。
   eventSource = searchBookMultiSSE({
-    key: finalKey,
+    key: plainKeyword(finalKey),
     concurrentCount: 24,
     bookSourceGroup: searchScope.value === 'group' ? selectedGroup.value : undefined,
     bookSourceUrl: searchScope.value === 'source' ? selectedSourceUrl.value : undefined,
@@ -289,7 +311,9 @@ function doSearch(rawKey: string) {
       const data = JSON.parse(event.data)
       if (data.data && Array.isArray(data.data)) {
         const existing = new Set(shelfStore.searchResults.map((r) => `${r.origin}::${r.bookUrl}`))
-        const newBooks = data.data.filter((b: SearchBook) => !existing.has(`${b.origin}::${b.bookUrl}`))
+        const newBooks = sanitizeBooks(
+          (data.data as SearchBook[]).filter((b) => !existing.has(`${b.origin}::${b.bookUrl}`)),
+        )
         // 每收到一批就按相关性重排，精确结果始终置顶，不必等全部搜完
         shelfStore.searchResults = sortByRelevance(
           [...shelfStore.searchResults, ...newBooks],
@@ -361,7 +385,7 @@ function handleBookInfo(book: Book | SearchBook) {
 
 async function handleAddToShelf(book: Book | SearchBook) {
   try {
-    await saveBook({
+    await shelfStore.addToShelf({
       name: book.name,
       author: book.author,
       bookUrl: book.bookUrl,
@@ -369,7 +393,6 @@ async function handleAddToShelf(book: Book | SearchBook) {
       coverUrl: book.coverUrl,
     })
     appStore.showToast(`"${book.name}" 已加入书架`, 'success')
-    shelfStore.fetchBooks()
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')
   }

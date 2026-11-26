@@ -173,8 +173,11 @@ export function checkSourceCompatibility(
       level: 'B',
     })
   }
-  // lookbehind 排除 {{$.x}} 的第二个 {，只命中真正的单花括号模板
-  if (/(?<!\{)\{\$\./.test(blob)) {
+  // lookbehind 同时排除两类合法写法，只命中真正的单花括号模板：
+  //   {{$.x}} —— 双花括号模板，第二个 { 前面是 {
+  //   `${$.x}` —— JS 模板字符串（$ 为箭头函数参数/源变量），{ 前面是 $
+  // 两者都不是书源单花括号，误判会让中文书城/中文万维等纯 JS 目录源被错标「需留意」。
+  if (/(?<![{$])\{\$\./.test(blob)) {
     push({
       code: 'SINGLE_BRACE',
       label: '单花括号模板 {$.x}',

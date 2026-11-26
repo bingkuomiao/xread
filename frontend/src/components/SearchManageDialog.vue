@@ -9,7 +9,7 @@
           <header class="modal-header">
             <div>
               <h2>搜索管理</h2>
-              <p class="subtitle">调整结果匹配方式与搜索范围</p>
+              <p class="subtitle">调整匹配方式与范围 · <strong>自动跨设备同步</strong></p>
             </div>
             <button class="icon-btn" @click="close" aria-label="关闭">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -59,6 +59,27 @@
                   </button>
                 </div>
                 <p class="field-hint">打开后，从顶部搜索框发起搜索会一次性搜遍所有书源，而不只在当前书源里找。</p>
+              </div>
+            </section>
+            <section class="work-area">
+              <div class="field">
+                <div class="field-head">
+                  <span class="field-label">封面匹配</span>
+                  <button
+                    type="button"
+                    class="action-btn search-toggle"
+                    :class="{ active: appStore.matchCoverByIdle }"
+                    role="switch"
+                    :aria-checked="appStore.matchCoverByIdle"
+                    @click="appStore.toggleMatchCoverByIdle()"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+                      <path d="M20 6 9 17l-5-5" />
+                    </svg>
+                    {{ appStore.matchCoverByIdle ? '已开启' : '已关闭' }}
+                  </button>
+                </div>
+                <p class="field-hint">开启后在空闲时静默为本地导入的书籍（TXT/EPUB）从书源匹配封面，不占用启动与导入时间；仅针对本地书，网络书不受影响。</p>
               </div>
             </section>
           </div>
@@ -145,6 +166,11 @@ function close() {
   margin-top: var(--space-1);
   font-size: var(--text-sm);
   color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+.subtitle strong {
+  color: var(--color-primary, #f43f5e);
+  font-weight: 600;
 }
 
 .icon-btn {

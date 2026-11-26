@@ -19,7 +19,6 @@
       </button>
       <button class="action-btn" type="button" @click="$emit('import-local')">本地导入</button>
       <button class="action-btn" type="button" @click="$emit('open-subscriptions')">远程同步</button>
-      <button class="action-btn" type="button" @click="$emit('export')">导出选中</button>
       <button class="action-btn" :disabled="testing || total === 0" type="button" @click="$emit('test-sources')">
         {{ testing ? '测试中...' : '测试书源' }}
       </button>
@@ -57,7 +56,6 @@ defineEmits<{
   refresh: []
   'import-local': []
   'open-subscriptions': []
-  export: []
   'test-sources': []
   'delete-invalid': []
   create: []

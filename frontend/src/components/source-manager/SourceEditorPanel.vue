@@ -54,10 +54,7 @@
               aria-label="设为发现页默认书源"
               @click="toggleExploreDefault"
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-                <path d="M20 6 9 17l-5-5" />
-              </svg>
-              {{ isExploreDefault ? '已设置默认' : '已取消默认' }}
+              {{ isExploreDefault ? '取消默认' : '设置默认' }}
             </button>
           </div>
           <div class="overview-card">

@@ -90,6 +90,16 @@ describe('checkSourceCompatibility', () => {
     expect(codes(r)).toContain('SINGLE_BRACE')
   })
 
+  it('JS 模板字符串 ${$.x} 与双花括号 {{$.x}} 不误判为单花括号', () => {
+    const s = plainSource()
+    s.ruleToc = {
+      chapterList: 'list.map($=>`https://x.com/bookId=${$.bookid}&cid=${$.id}`)',
+    }
+    s.ruleSearch = { bookList: '$.data', name: '{{$.name}}' }
+    const r = checkSourceCompatibility(s)
+    expect(codes(r)).not.toContain('SINGLE_BRACE')
+  })
+
   it('需登录判 B（不是 C，可登录后使用）', () => {
     const s = plainSource()
     s.loginUrl = 'https://novel.example/login'

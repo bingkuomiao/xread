@@ -44,6 +44,8 @@
       <div v-if="selectedCount > 0" class="selection-tools">
         <span>已选 {{ selectedCount }}</span>
         <button class="mini-btn" type="button" @click="$emit('clear-selection')">清空</button>
+        <button class="mini-btn" type="button" @click="$emit('export-selection')">导出选中</button>
+        <button class="mini-btn" type="button" @click="$emit('clear-compat-marks')">兼容选中</button>
         <button class="mini-btn danger" type="button" @click="$emit('delete-selection')">删除选中</button>
       </div>
     </section>
@@ -69,6 +71,8 @@ defineEmits<{
   'update:filterGroup': [value: string]
   'toggle-current-selection': []
   'clear-selection': []
+  'export-selection': []
+  'clear-compat-marks': []
   'delete-selection': []
 }>()
 
