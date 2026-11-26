@@ -13,6 +13,9 @@ import {
  * 发现页首页书列缓存：按「书源 + 榜单 + 变量」维度缓存 `exploreBook` 第 1 页，
  * 让重复进入发现页 / 切回某源时首屏瞬时出书单，省去一次后端对外网书源的真实请求。
  *
+ * 缓存同时落盘 localStorage：App 冷启动时同步恢复，即便已过新鲜期也先用上次结果渲染
+ * 首屏、再后台静默刷新，避免首次打开对着空白等外网书源（陈旧可用期 12 小时）。
+ *
  * 安全性约束（务必遵守，否则会抵消 1.0.120 的修复）：
  * - 仅缓存「非空的」首页结果（空结果一律不入库），因此命中缓存绝不可能是「暂无数据」。
  * - key 含榜单 URL 与变量：写操作（切源/切分类/改筛选）必然产生新 key 而失效，
@@ -26,11 +29,78 @@ interface CachedBooks {
   books: SearchBook[]
   ts: number
 }
-const booksCache = new Map<string, CachedBooks>()
-/** 首页书列缓存有效期：2 分钟内复用，过期后正常网络拉取。 */
+/** 首页书列缓存的 localStorage 键：跨 App 冷启动复用，省去首屏对外网书源的等待。 */
+const BOOKS_STORAGE_KEY = 'xread-explore-books-cache-v1'
+/** 新鲜期：2 分钟内完全复用，前半段不请求、后半段后台刷新。 */
 const BOOKS_TTL = 2 * 60 * 1000
-/** 缓存条目上限：书源×榜单×变量组合数本就有限，超出时丢弃最旧条目，避免长会话内存无界增长。 */
+/**
+ * 陈旧可用期：12 小时内，即便已过新鲜期，冷启动仍先用缓存渲染首屏、再后台静默刷新。
+ * 这是「首次打开至少等 5 秒」的关键——缓存的书列来自上次成功的网络结果，
+ * 秒开展示后再后台更新，用户不再对着空白等外网书源响应。
+ * 超过此时长则丢弃缓存走正常网络，避免无限期展示过期内容。
+ */
+const BOOKS_STALE_TTL = 12 * 60 * 60 * 1000
+/** 内存缓存条目上限：书源×榜单×变量组合数有限，超出丢弃最旧条目。 */
 const BOOKS_CACHE_MAX = 50
+/** 持久化条目上限：localStorage 容量有限，只落盘最近若干个组合。 */
+const BOOKS_PERSIST_MAX = 10
+
+/** 从 localStorage 同步恢复书列缓存（模块加载时执行一次）。仅接受非空书列，遵循 1.0.120 约束。 */
+function loadBooksCache(): Map<string, CachedBooks> {
+  const map = new Map<string, CachedBooks>()
+  try {
+    const raw = localStorage.getItem(BOOKS_STORAGE_KEY)
+    if (!raw) return map
+    const parsed = JSON.parse(raw) as Record<string, CachedBooks>
+    for (const [key, value] of Object.entries(parsed || {})) {
+      if (value && Array.isArray(value.books) && value.books.length > 0 && typeof value.ts === 'number') {
+        map.set(key, value)
+      }
+    }
+  } catch {
+    // 存储不可用或数据损坏：退化为纯内存缓存，不影响功能
+  }
+  return map
+}
+
+const booksCache = loadBooksCache()
+
+/** 把当前缓存落盘（容量不足/隐私模式时静默降级为纯内存缓存）。 */
+function persistBooksCache() {
+  try {
+    const entries = Array.from(booksCache.entries()).slice(-BOOKS_PERSIST_MAX)
+    const obj: Record<string, CachedBooks> = {}
+    for (const [key, value] of entries) obj[key] = value
+    localStorage.setItem(BOOKS_STORAGE_KEY, JSON.stringify(obj))
+  } catch {
+    // 忽略：localStorage 不可用时仍保留内存缓存
+  }
+}
+
+/** 统一写入缓存 + 裁剪 + 落盘，保证所有写路径行为一致。 */
+function setBooksCache(key: string, books: SearchBook[]) {
+  booksCache.set(key, { books: [...books], ts: Date.now() })
+  while (booksCache.size > BOOKS_CACHE_MAX) {
+    const oldest = booksCache.keys().next().value
+    if (oldest === undefined) break
+    booksCache.delete(oldest)
+  }
+  persistBooksCache()
+}
+
+/**
+ * 清空发现页书列缓存（内存 + localStorage）。
+ * 供「设置页刷新全部数据」调用：清掉陈旧书列后，下次进入发现页会强制走网络拉最新，
+ * 保证拿到书源上的最新书籍列表，而不是 12 小时陈旧可用期内的旧数据。
+ */
+export function clearExploreBooksCache() {
+  booksCache.clear()
+  try {
+    localStorage.removeItem(BOOKS_STORAGE_KEY)
+  } catch {
+    // 隐私模式 / localStorage 不可用：内存缓存已清，不影响本次会话的下次加载
+  }
+}
 
 /** 把变量对象规范成稳定 key（键排序 + 值序列化），用于缓存命中判定。 */
 function varsKeyOf(vars: Record<string, string>): string {
@@ -77,6 +147,15 @@ export function refreshExploreDefaultPreference() {
 export function isExploreDefaultSource(url: string): boolean {
   if (!url) return false
   return preferredSourceUrl.value === url
+}
+
+/**
+ * 获取当前发现页默认书源 URL（未设置时为 ''）。
+ * 供搜索页「单个书源」默认值复用，使搜索默认书源与发现页默认书源保持同一来源：
+ * 用户在发现页调整默认书源后，单书源搜索的默认值随之改变，无需重复设置。
+ */
+export function getExploreDefaultSourceUrl(): string {
+  return preferredSourceUrl.value
 }
 
 export const useExploreStore = defineStore('explore', () => {
@@ -347,6 +426,20 @@ export const useExploreStore = defineStore('explore', () => {
     await fetchMore(token)
   }
 
+  /**
+   * 强制刷新：清掉书列缓存后重新从书源拉取当前榜单第 1 页的最新数据。
+   * 供设置页「刷新全部数据」调用。若尚未初始化（如从未进过发现页），先 init 建立书源/榜单。
+   */
+  async function refresh() {
+    clearExploreBooksCache()
+    if (!activeSourceUrl.value || !activeCategoryUrl.value) {
+      await init()
+    }
+    if (!activeSourceUrl.value || !activeCategoryUrl.value) return
+    const token = ++opToken.value
+    await resetAndFetch(token)
+  }
+
   /** 首页书列缓存 key：书源 + 榜单 + 变量组合，任意一项变化都产生新 key 而失效。 */
   function booksCacheKey(): string {
     return `${activeSourceUrl.value}::${activeCategoryUrl.value}::${varsKeyOf(variables.value)}`
@@ -357,17 +450,19 @@ export const useExploreStore = defineStore('explore', () => {
     if (loading.value || !hasMore.value || !activeSourceUrl.value || !activeCategoryUrl.value) return
 
     // 首页命中缓存：瞬时出列表，仅在缓存偏旧时再于后台静默刷新，避免每次进入都等网络。
+    // 命中窗口放宽到「陈旧可用期」：冷启动时上次缓存虽已过 2 分钟新鲜期，
+    // 仍先用它渲染首屏（不再对着空白等外网书源），再后台静默刷新拿最新数据。
     if (page.value === 1) {
       const hit = booksCache.get(booksCacheKey())
-      if (hit && Date.now() - hit.ts < BOOKS_TTL) {
+      if (hit && Date.now() - hit.ts < BOOKS_STALE_TTL) {
         books.value = hit.books
         page.value = 2
-        // 缓存较新（前半段有效期）：直接复用，不发起网络请求。
+        // 缓存较新（前半段新鲜期）：直接复用，不发起网络请求。
         if (Date.now() - hit.ts < BOOKS_TTL / 2) {
           loading.value = false
           return
         }
-        // 缓存偏旧：仍先展示，并后台刷新（不阻塞首屏）。
+        // 缓存偏旧或来自冷启动：仍先展示，并后台刷新（不阻塞首屏）。
         void refreshBooksInBackground(token, hit.ts)
         return
       }
@@ -388,14 +483,7 @@ export const useExploreStore = defineStore('explore', () => {
       if (result && result.length > 0) {
         books.value.push(...result)
         if (page.value === 1) {
-          const key = booksCacheKey()
-          booksCache.set(key, { books: [...result], ts: Date.now() })
-          // 超出上限时丢弃最旧条目（Map 保持插入顺序）。
-          while (booksCache.size > BOOKS_CACHE_MAX) {
-            const oldest = booksCache.keys().next().value
-            if (oldest === undefined) break
-            booksCache.delete(oldest)
-          }
+          setBooksCache(booksCacheKey(), result)
         }
         page.value++
       } else {
@@ -434,7 +522,7 @@ export const useExploreStore = defineStore('explore', () => {
         books.value = result
       }
       if (result && result.length > 0) {
-        booksCache.set(booksCacheKey(), { books: [...result], ts: Date.now() })
+        setBooksCache(booksCacheKey(), result)
       }
     } catch {
       // 后台刷新失败不影响已展示的缓存内容。
@@ -479,5 +567,6 @@ export const useExploreStore = defineStore('explore', () => {
     setCategory,
     fetchMore,
     resetAndFetch,
+    refresh,
   }
 })

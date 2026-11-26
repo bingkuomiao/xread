@@ -1,6 +1,7 @@
 import http from './http'
 import type { SearchBook } from '../types'
 import { appendAuthQueryParams } from '../utils/secureAccess'
+import { sanitizeBooks } from '../utils/cleanText'
 
 export function searchBookMulti(params: {
   key: string
@@ -8,7 +9,7 @@ export function searchBookMulti(params: {
   bookSourceGroup?: string
   bookSourceUrl?: string
 }) {
-  return http.post<SearchBook[]>('/searchBookMulti', params).then((r) => r.data)
+  return http.post<SearchBook[]>('/searchBookMulti', params).then((r) => sanitizeBooks(r.data))
 }
 
 /**
@@ -39,7 +40,7 @@ export function exploreBook(params: {
   bookSourceUrl: string
   page?: number
 }) {
-  return http.post<SearchBook[]>('/exploreBook', params).then((r) => r.data)
+  return http.post<SearchBook[]>('/exploreBook', params).then((r) => sanitizeBooks(r.data))
 }
 
 export function getAvailableBookSource(params: {
@@ -91,12 +92,12 @@ function normalizeAvailableBookSourceResult(
 ): AvailableBookSourceResult {
   if (Array.isArray(data)) {
     return {
-      books: data,
+      books: sanitizeBooks(data),
       lastIndex: data.length - 1,
       hasMore: false,
     }
   }
-  return data
+  return { ...data, books: sanitizeBooks(data.books) }
 }
 
 export function searchBookSourceSSE(params: {
@@ -118,4 +119,53 @@ export function searchBookSourceSSE(params: {
   appendAuthQueryParams(query)
 
   return new EventSource(`/reader3/searchBookSourceSSE?${query.toString()}`)
+}
+
+/**
+ * 一次性多书源关键词搜索（SSE 版，与推荐书源共用流式接口）。
+ * 收集所有流式批次的候选，收到 end / 出错 / 超时后 resolve 汇总结果。
+ * 无 EventSource 的环境（SSR / 部分测试）自动回退到普通接口，保证可调用性。
+ */
+export function searchBookMultiOnce(params: {
+  key: string
+  concurrentCount?: number
+  searchSize?: number
+  timeoutMs?: number
+}): Promise<SearchBook[]> {
+  if (typeof EventSource === 'undefined') {
+    return searchBookMulti({ key: params.key })
+  }
+  return new Promise((resolve) => {
+    const books: SearchBook[] = []
+    const seen = new Set<string>()
+    let settled = false
+    let timer: ReturnType<typeof setTimeout>
+    const es = searchBookMultiSSE({
+      key: params.key,
+      concurrentCount: params.concurrentCount ?? 10,
+      searchSize: params.searchSize ?? 50,
+    })
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { es.close() } catch { /* noop */ }
+      resolve(sanitizeBooks(books))
+    }
+    es.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as { data?: SearchBook[] }
+        const batch = Array.isArray(payload?.data) ? payload.data : []
+        for (const b of batch) {
+          const k = `${b.name}__${b.author}__${b.bookUrl}`
+          if (seen.has(k)) continue
+          seen.add(k)
+          books.push(b)
+        }
+      } catch { /* 忽略畸形消息 */ }
+    }
+    es.addEventListener('end', finish)
+    es.onerror = finish
+    timer = setTimeout(finish, params.timeoutMs ?? 8000)
+  })
 }

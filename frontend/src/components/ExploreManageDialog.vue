@@ -9,7 +9,7 @@
           <header class="modal-header">
             <div>
               <h2>发现管理</h2>
-              <p class="subtitle">配置发现页默认书源，选择后即时生效并同步至其他设备</p>
+              <p class="subtitle">配置默认书源 · <strong>自动跨设备同步</strong></p>
             </div>
             <button class="icon-btn" @click="close" aria-label="关闭">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -267,6 +267,11 @@ function close() {
   margin-top: var(--space-1);
   font-size: var(--text-sm);
   color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+.subtitle strong {
+  color: var(--color-primary, #f43f5e);
+  font-weight: 600;
 }
 
 .icon-btn {
