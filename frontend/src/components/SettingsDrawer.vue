@@ -72,32 +72,26 @@
               书架管理
             </h3>
             <div class="btn-group vertical-grid">
-              <button class="action-btn" @click="goToBookshelf">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                  <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20" />
-                  <path d="M4 5.5V19a2 2 0 0 0 2 2h14" />
-                  <path d="M8 7h8" />
-                  <path d="M8 11h8" />
-                  <path d="M8 15h5" />
-                </svg>
-                书架
-              </button>
-              <button class="action-btn" :disabled="localBookUploading" @click="triggerImportBook">
+              <button class="action-btn" :disabled="localBookUploading || appStore.batchTask.kind === 'import'" @click="triggerImportBook">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                   <path d="M12 3v12" />
                   <path d="m7 8 5-5 5 5" />
                   <path d="M5 21h14" />
                 </svg>
-                导入
+                {{
+                  appStore.batchTask.kind === 'import'
+                    ? `导入 ${appStore.batchTask.current}/${appStore.batchTask.total}`
+                    : '导入'
+                }}
               </button>
-              <button class="action-btn" :disabled="shelfStore.refreshing" @click="triggerRefreshShelf">
-                <svg :class="{ spinning: shelfStore.refreshing }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+              <button class="action-btn" :disabled="refreshingAll" @click="triggerRefreshShelf">
+                <svg :class="{ spinning: refreshingAll }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                   <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
                   <path d="M3 3v5h5" />
                   <path d="M3 12a9 9 0 0 0 15.55 6.2L21 16" />
                   <path d="M21 21v-5h-5" />
                 </svg>
-                {{ shelfStore.refreshing ? '刷新中...' : '刷新' }}
+                刷新
               </button>
               <button class="action-btn" @click="triggerManageGroups">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
@@ -338,6 +332,8 @@ import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
+import { isLocalBook } from '../utils/localBook'
+import { enrichLocalBookMeta } from '../api/bookshelf'
 import { changePassword, logout as apiLogout } from '../api/user'
 import CustomThemeCard from './CustomThemeCard.vue'
 
@@ -352,6 +348,7 @@ const emit = defineEmits<{
 const router = useRouter()
 const appStore = useAppStore()
 const shelfStore = useBookshelfStore()
+const refreshingAll = ref(false)
 const appVersion = __APP_VERSION__
 const showPasswordPanel = ref(false)
 const changingPassword = ref(false)
@@ -508,13 +505,6 @@ async function handleDismissVersionUpdate() {
   await appStore.dismissVersionUpdateReminder()
 }
 
-async function goToBookshelf() {
-  close()
-  if (router.currentRoute.value.path !== '/') {
-    await router.push('/')
-  }
-}
-
 async function triggerImportBook() {
   close()
   if (router.currentRoute.value.path !== '/') {
@@ -523,13 +513,66 @@ async function triggerImportBook() {
   window.dispatchEvent(new CustomEvent('trigger-local-book-upload'))
 }
 
+/**
+ * 静默为「本地导入且当前无封面」的书逐个补封面：
+ * 复用导入时的补全接口（后端/接口幂等，已有封面的书直接跳过）。
+ * 串行执行——一本完成再补下一本，避免并发搜索压垮书源、也不产生瞬时 CPU 峰值。
+ * 单飞调度：刷新期间连点/多入口只跑一轮；一轮结束后若期间有新请求，再补跑一轮。
+ */
+let enrichRunning = false
+let enrichPending = false
+
+async function runEnrichCoversOnce() {
+  // 每轮重新取候选，覆盖执行期间新导入、仍无封面的本地书
+  const candidates = shelfStore.books.filter(
+    (b) => isLocalBook(b) && !b.customCoverUrl && !b.coverUrl,
+  )
+  let receivedCover = false
+  for (const book of candidates) {
+    try {
+      const result = await enrichLocalBookMeta(book)
+      if (result?.cover) receivedCover = true
+    } catch {
+      // 单本补全失败不影响其余书，继续下一本
+    }
+  }
+  if (receivedCover) await shelfStore.fetchBooks().catch(() => undefined)
+}
+
+function enrichLocalCoversSilently() {
+  if (enrichRunning) {
+    enrichPending = true
+    return
+  }
+  enrichRunning = true
+  void (async () => {
+    try {
+      do {
+        enrichPending = false
+        await runEnrichCoversOnce()
+      } while (enrichPending)
+    } finally {
+      enrichRunning = false
+    }
+  })()
+}
+
+/**
+ * 刷新书架（设置页刷新按钮）：先拉一次服务端书架；
+ * 拉取完成后再在后台串行逐本补本地书封面（不阻塞刷新、不弹提示、不刷发现页/清缓存）。
+ */
 async function triggerRefreshShelf() {
+  if (refreshingAll.value) return
+  refreshingAll.value = true
   try {
     await shelfStore.refreshBooks()
     appStore.showToast('书架已刷新', 'success')
-  } catch (e: any) {
-    appStore.showToast(e.message || '刷新书架失败', 'error')
+  } catch {
+    appStore.showToast('书架刷新失败，请稍后重试', 'warning')
+  } finally {
+    refreshingAll.value = false
   }
+  enrichLocalCoversSilently()
 }
 
 function triggerManageGroups() {
@@ -887,6 +930,9 @@ async function handleCheckVersionUpdate() {
 
 .status-card small {
   color: var(--color-text-tertiary);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 
 .status-card.accent {

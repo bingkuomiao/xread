@@ -1,14 +1,19 @@
 import { defineStore } from 'pinia'
 import { ref, watch, computed } from 'vue'
-import { recordReadingTime } from '../utils/readingStats'
+import {
+  recordReadingTime,
+  getUnifiedSummary,
+  markBookOpened as recordBookOpened,
+  markChapterRead as recordChapterRead,
+} from '../utils/readingStats'
 import { getUserInfo } from '../api/user'
 import { dismissVersionUpdate, getVersionUpdate } from '../api/update'
 import type { UserInfo, VersionUpdateInfo } from '../types'
 import { applySystemTheme } from '../utils/systemUi'
 import { computeNeedSecureKey, readStoredSecureKey, SECURE_KEY_STORAGE_KEY } from '../utils/secureAccess'
+import { clearAllCoverMatchAttempts } from '../utils/coverMatchState'
 
 export const useAppStore = defineStore('app', () => {
-  const STATS_KEY = 'reader-stats'
   // ─── Theme ───
   const savedTheme = localStorage.getItem('theme') as 'light' | 'dark' | null
   const legacyReaderNight = localStorage.getItem('reader-isNight') === 'true'
@@ -61,7 +66,18 @@ export const useAppStore = defineStore('app', () => {
   })
   const hasVersionUpdateReminder = computed(() => !!versionUpdate.value?.shouldRemind)
 
-  async function fetchUserInfo() {
+  // 多个视图（App 全局、首页、need-login）都会调用用户信息，
+  // 用 in-flight promise 去重，避免同一时刻发出多个重复请求拖慢首屏。
+  let userInfoTask: Promise<void> | null = null
+  function fetchUserInfo(): Promise<void> {
+    if (userInfoTask) return userInfoTask
+    userInfoTask = doFetchUserInfo().finally(() => {
+      userInfoTask = null
+    })
+    return userInfoTask
+  }
+
+  async function doFetchUserInfo() {
     try {
       const data = await getUserInfo()
       userInfo.value = data.userInfo
@@ -189,6 +205,23 @@ export const useAppStore = defineStore('app', () => {
     setSearchAllByDefault(!searchAllByDefault.value)
   }
 
+  // ─── Local Book Cover Matching (idle) ───
+  // 「封面匹配」开关：开启后在浏览器空闲时静默为无封面的本地导入书（TXT/EPUB）
+  // 从书源匹配封面并写回。严格仅针对本地导入书，网络书永不进入此链路。默认开启，设置持久化。
+  const matchCoverByIdle = ref(localStorage.getItem('xread-match-cover-idle') !== 'false')
+
+  function setMatchCoverByIdle(value: boolean) {
+    const wasOff = !matchCoverByIdle.value
+    matchCoverByIdle.value = value
+    localStorage.setItem('xread-match-cover-idle', value ? 'true' : 'false')
+    // 从关→开：清空尝试记录，强制重新匹配一轮（否则书源未变会被判定为已搜过而跳过）
+    if (value && wasOff) clearAllCoverMatchAttempts()
+  }
+
+  function toggleMatchCoverByIdle() {
+    setMatchCoverByIdle(!matchCoverByIdle.value)
+  }
+
   // ─── UI State ───
   const showLoginModal = ref(false)
   const showSettingsDrawer = ref(false)
@@ -211,25 +244,10 @@ export const useAppStore = defineStore('app', () => {
   const deferredInstallPrompt = ref<any>(null)
   const waitingServiceWorker = ref<ServiceWorker | null>(null)
 
-  const initialReadingStats = (() => {
-    try {
-      return JSON.parse(localStorage.getItem(STATS_KEY) || '{"totalSeconds":0,"openedBooks":[],"readChapters":[],"completedBooks":[]}')
-    } catch {
-      return { totalSeconds: 0, openedBooks: [], readChapters: [], completedBooks: [] }
-    }
-  })()
-
-  const readingStats = ref<{
-    totalSeconds: number
-    openedBooks: string[]
-    readChapters: string[]
-    completedBooks: string[]
-  }>(initialReadingStats)
+  // 阅读统计统一由 utils/readingStats（xread-reading-stats-v2）承载：
+  // 本 store 只保留「阅读会话计时」职责（进入/离开阅读页），计时结束把时长记入新数据源；
+  // 书籍/章节标记也转发到新数据源。此处不再单独维护 totalSeconds，避免两套数据重复累加。
   let readingSessionStartedAt = 0
-
-  function persistStats() {
-    localStorage.setItem(STATS_KEY, JSON.stringify(readingStats.value))
-  }
 
   function startReadingSession() {
     if (!readingSessionStartedAt) readingSessionStartedAt = Date.now()
@@ -238,55 +256,83 @@ export const useAppStore = defineStore('app', () => {
   function stopReadingSession(bookInfo?: { bookUrl: string; bookName: string; author?: string; coverUrl?: string; origin?: string }) {
     if (!readingSessionStartedAt) return
     const delta = Math.max(0, Math.round((Date.now() - readingSessionStartedAt) / 1000))
-    readingStats.value.totalSeconds += delta
     readingSessionStartedAt = 0
-    persistStats()
     if (delta > 0) {
       recordReadingTime(delta, bookInfo)
     }
   }
 
   function markBookOpened(bookUrl: string) {
-    if (!readingStats.value.openedBooks.includes(bookUrl)) {
-      readingStats.value.openedBooks.push(bookUrl)
-      persistStats()
-    }
+    recordBookOpened(bookUrl)
   }
 
   function markChapterRead(bookUrl: string, index: number, totalChapters: number) {
-    const key = `${bookUrl}#${index}`
-    if (!readingStats.value.readChapters.includes(key)) {
-      readingStats.value.readChapters.push(key)
-    }
-    if (totalChapters > 0 && index >= totalChapters - 1 && !readingStats.value.completedBooks.includes(bookUrl)) {
-      readingStats.value.completedBooks.push(bookUrl)
-    }
-    persistStats()
+    recordChapterRead(bookUrl, index, totalChapters)
   }
 
-  const readingStatsSummary = computed(() => {
-    const totalMinutes = Math.floor(readingStats.value.totalSeconds / 60)
-    const hours = Math.floor(totalMinutes / 60)
-    const minutes = totalMinutes % 60
-    return {
-      totalSeconds: readingStats.value.totalSeconds,
-      totalTimeText: hours ? `${hours}小时${minutes}分钟` : `${Math.max(1, totalMinutes)}分钟`,
-      openedBooks: readingStats.value.openedBooks.length,
-      readChapters: readingStats.value.readChapters.length,
-      completedBooks: readingStats.value.completedBooks.length,
-    }
-  })
+  const readingStatsSummary = computed(() => getUnifiedSummary())
 
   // ─── Toast ───
   const toasts = ref<Array<{ id: number; message: string; type: string }>>([])
   let toastId = 0
 
-  function showToast(message: string, type: 'success' | 'error' | 'warning' = 'success') {
+  function showToast(
+    message: string,
+    type: 'success' | 'error' | 'warning' = 'success',
+    duration = 3000,
+  ) {
     const id = ++toastId
     toasts.value.push({ id, message, type })
     setTimeout(() => {
       toasts.value = toasts.value.filter((t) => t.id !== id)
+    }, duration)
+  }
+
+  // 可更新的进度 toast：复用右上角 toast 容器，进度期间常驻不自动消失，
+  // 完成后转成结果态并在 3 秒后消失。用于批量导入/导出等串行任务的实时进度。
+  function showProgressToast(message: string) {
+    const id = ++toastId
+    toasts.value.push({ id, message, type: 'progress' })
+    return id
+  }
+
+  function updateProgressToast(id: number, message: string) {
+    const toast = toasts.value.find((t) => t.id === id)
+    if (toast) toast.message = message
+  }
+
+  function finishProgressToast(
+    id: number,
+    message: string,
+    type: 'success' | 'error' | 'warning' = 'success',
+  ) {
+    const toast = toasts.value.find((t) => t.id === id)
+    if (!toast) return
+    toast.message = message
+    toast.type = type
+    setTimeout(() => {
+      toasts.value = toasts.value.filter((t) => t.id !== id)
     }, 3000)
+  }
+
+  // ─── 批量任务进度（驱动导入/导出按钮文字）───
+  // kind 为空表示无进行中的任务；同一时刻只允许一种批量任务。
+  const batchTask = ref<{ kind: 'import' | 'export' | null; current: number; total: number }>({
+    kind: null,
+    current: 0,
+    total: 0,
+  })
+
+  function startBatchTask(kind: 'import' | 'export', total: number) {
+    batchTask.value = { kind, current: 0, total }
+  }
+
+  function updateBatchTask(current: number) {
+    batchTask.value.current = current
+  }
+
+  function finishBatchTask() {
+    batchTask.value = { kind: null, current: 0, total: 0 }
   }
 
   function setOnlineStatus(value: boolean) {
@@ -327,6 +373,7 @@ export const useAppStore = defineStore('app', () => {
     theme, setTheme, toggleTheme,
     exactMatch, setExactMatch, toggleExactMatch,
     searchAllByDefault, setSearchAllByDefault, toggleSearchAllByDefault,
+    matchCoverByIdle, setMatchCoverByIdle, toggleMatchCoverByIdle,
     userInfo, isSecureMode, needSecureKey, secureKeyRequired, adminAuthorized, publicRead,
     canManageBookSources, secureKey, isLoggedIn,
     versionUpdate, versionUpdateLoading, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
@@ -335,7 +382,8 @@ export const useAppStore = defineStore('app', () => {
     sourceGroupVersion, bumpSourceGroupVersion,
     isOnline, pwaReady, pwaUpdateAvailable, deferredInstallPrompt, waitingServiceWorker,
     setOnlineStatus, setPwaReady, setPwaUpdateAvailable, setDeferredInstallPrompt, setWaitingServiceWorker, installPwa, applyPwaUpdate,
-    readingStats, readingStatsSummary, startReadingSession, stopReadingSession, markBookOpened, markChapterRead,
-    toasts, showToast,
+    readingStatsSummary, startReadingSession, stopReadingSession, markBookOpened, markChapterRead,
+    toasts, showToast, showProgressToast, updateProgressToast, finishProgressToast,
+    batchTask, startBatchTask, updateBatchTask, finishBatchTask,
   }
 })

@@ -218,6 +218,10 @@ ul, ol {
   border-left: 3px solid var(--color-warning);
 }
 
+.toast.progress {
+  border-left: 3px solid var(--color-primary, #4a90e2);
+}
+
 @keyframes toastIn {
   from {
     transform: translateX(20px);
