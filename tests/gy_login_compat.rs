@@ -1,4 +1,4 @@
-use reader_rust::parser::js::{eval_js, with_js_lib};
+use xread::parser::js::{eval_js, with_js_lib};
 
 const GY_JSLIB_TRUNCATED: &str = r#"
 let hosts = [

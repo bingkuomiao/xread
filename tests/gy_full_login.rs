@@ -1,4 +1,4 @@
-use reader_rust::parser::js::{eval_js_with_source_bindings, get_js_cookie, with_js_lib};
+use xread::parser::js::{eval_js_with_source_bindings, get_js_cookie, with_js_lib};
 use serde_json::json;
 use std::collections::HashMap;
 

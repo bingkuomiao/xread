@@ -1,8 +1,8 @@
-use reader_rust::crawler::http_client::HttpClient;
-use reader_rust::model::book_source::{book_source_from_value, BookSource};
-use reader_rust::parser::rule_engine::RuleEngine;
-use reader_rust::service::book_service::BookService;
-use reader_rust::storage::cache::file_cache::FileCache;
+use xread::crawler::http_client::HttpClient;
+use xread::model::book_source::{book_source_from_value, BookSource};
+use xread::parser::rule_engine::RuleEngine;
+use xread::service::book_service::BookService;
+use xread::storage::cache::file_cache::FileCache;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;

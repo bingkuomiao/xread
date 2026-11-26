@@ -1,9 +1,9 @@
 use axum::{http::HeaderMap, response::Json, routing::get, Router};
-use reader_rust::crawler::http_client::HttpClient;
-use reader_rust::model::{book_source::BookSource, rule::TocRule};
-use reader_rust::parser::rule_engine::RuleEngine;
-use reader_rust::service::book_service::BookService;
-use reader_rust::storage::cache::file_cache::FileCache;
+use xread::crawler::http_client::HttpClient;
+use xread::model::{book_source::BookSource, rule::TocRule};
+use xread::parser::rule_engine::RuleEngine;
+use xread::service::book_service::BookService;
+use xread::storage::cache::file_cache::FileCache;
 use serde_json::{json, Value};
 use uuid::Uuid;
 

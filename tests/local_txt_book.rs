@@ -1,4 +1,4 @@
-use reader_rust::service::local_txt_book::{build_chapter_url, parse_txt_chapters};
+use xread::service::local_txt_book::{build_chapter_url, parse_txt_chapters};
 
 #[test]
 fn txt_parser_splits_common_chapter_headings() {
@@ -69,11 +69,19 @@ async fn txt_import_saves_book_index_and_content_for_server_bookshelf() {
     if storage_dir.exists() {
         std::fs::remove_dir_all(&storage_dir).unwrap();
     }
-    let service = reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
+    let service = xread::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
     let bytes = "第1章 开始\n第一章内容。\n第二章 后来\n第二章内容。".as_bytes();
 
     let book = service
-        .import_txt_book("alice", "测试小说.txt", bytes)
+        .import_txt_book(
+            "alice",
+            "测试小说.txt",
+            bytes,
+            "测试小说",
+            "",
+            "",
+            "《测试小说》.txt",
+        )
         .await
         .unwrap();
     let chapters = service
@@ -103,10 +111,10 @@ async fn txt_import_rejects_non_txt_files() {
         "reader-rust-local-txt-reject-test-{}",
         std::process::id()
     ));
-    let service = reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
+    let service = xread::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
 
     let err = service
-        .import_txt_book("alice", "测试小说.md", "正文".as_bytes())
+        .import_txt_book("alice", "测试小说.md", "正文".as_bytes(), "", "", "", "")
         .await
         .expect_err("non txt file should be rejected");
 
@@ -120,7 +128,7 @@ async fn txt_service_rejects_non_hash_local_txt_urls() {
         "reader-rust-local-txt-path-test-{}",
         std::process::id()
     ));
-    let service = reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
+    let service = xread::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
 
     let err = service
         .get_chapter_list("alice", "local-txt:/tmp/escape")
@@ -140,9 +148,17 @@ async fn txt_delete_removes_imported_book_files() {
     if storage_dir.exists() {
         std::fs::remove_dir_all(&storage_dir).unwrap();
     }
-    let service = reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
+    let service = xread::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
     let book = service
-        .import_txt_book("alice", "待删除.txt", "第一章 开始\n正文".as_bytes())
+        .import_txt_book(
+            "alice",
+            "待删除.txt",
+            "第一章 开始\n正文".as_bytes(),
+            "待删除",
+            "",
+            "",
+            "《待删除》.txt",
+        )
         .await
         .unwrap();
     let chapters = service
@@ -165,10 +181,10 @@ async fn txt_delete_removes_imported_book_files() {
 
 #[tokio::test]
 async fn saving_same_named_local_txt_books_keeps_distinct_book_urls() {
-    use reader_rust::crawler::http_client::HttpClient;
-    use reader_rust::parser::rule_engine::RuleEngine;
-    use reader_rust::service::book_service::BookService;
-    use reader_rust::storage::cache::file_cache::FileCache;
+    use xread::crawler::http_client::HttpClient;
+    use xread::parser::rule_engine::RuleEngine;
+    use xread::service::book_service::BookService;
+    use xread::storage::cache::file_cache::FileCache;
 
     let storage_dir = std::env::temp_dir().join(format!(
         "reader-rust-local-txt-save-test-{}",
@@ -179,7 +195,7 @@ async fn saving_same_named_local_txt_books_keeps_distinct_book_urls() {
     }
 
     let local_service =
-        reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
+        xread::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
     let book_service = BookService::new(
         HttpClient::new(5, None).unwrap(),
         RuleEngine::new().unwrap(),
@@ -188,11 +204,27 @@ async fn saving_same_named_local_txt_books_keeps_distinct_book_urls() {
     );
 
     let first = local_service
-        .import_txt_book("alice", "同名小说.txt", "第一版正文".as_bytes())
+        .import_txt_book(
+            "alice",
+            "同名小说.txt",
+            "第一版正文".as_bytes(),
+            "同名小说",
+            "",
+            "",
+            "《同名小说》.txt",
+        )
         .await
         .unwrap();
     let second = local_service
-        .import_txt_book("alice", "同名小说.txt", "第二版正文".as_bytes())
+        .import_txt_book(
+            "alice",
+            "同名小说.txt",
+            "第二版正文".as_bytes(),
+            "同名小说",
+            "",
+            "",
+            "《同名小说》.txt",
+        )
         .await
         .unwrap();
 

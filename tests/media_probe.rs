@@ -1,5 +1,5 @@
-use reader_rust::model::book_source::BookSource;
-use reader_rust::parser::js::{eval_js, with_js_lib};
+use xread::model::book_source::BookSource;
+use xread::parser::js::{eval_js, with_js_lib};
 use std::fs;
 
 fn run(body: &str, label: &str) {

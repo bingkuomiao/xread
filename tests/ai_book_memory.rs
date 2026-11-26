@@ -1,8 +1,8 @@
-use reader_rust::model::ai_book::{
+use xread::model::ai_book::{
     AiBookCharacter, AiBookLocation, AiBookMap, AiBookMemory, AiBookNote, AiBookRelationship,
 };
-use reader_rust::service::ai_book_service::AiBookService;
-use reader_rust::storage::db;
+use xread::service::ai_book_service::AiBookService;
+use xread::storage::db;
 
 fn temp_storage_dir(name: &str) -> String {
     let path = std::env::temp_dir().join(format!(

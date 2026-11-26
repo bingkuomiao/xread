@@ -1,11 +1,11 @@
 use axum::{response::Html, routing::get, Router};
-use reader_rust::crawler::http_client::HttpClient;
-use reader_rust::model::book_source::BookSource;
-use reader_rust::model::rule::SearchRule;
-use reader_rust::parser::rule_engine::RuleEngine;
-use reader_rust::service::book_service::BookService;
-use reader_rust::service::book_source_service::set_invalid_book_source_group;
-use reader_rust::storage::cache::file_cache::FileCache;
+use xread::crawler::http_client::HttpClient;
+use xread::model::book_source::BookSource;
+use xread::model::rule::SearchRule;
+use xread::parser::rule_engine::RuleEngine;
+use xread::service::book_service::BookService;
+use xread::service::book_source_service::set_invalid_book_source_group;
+use xread::storage::cache::file_cache::FileCache;
 use uuid::Uuid;
 
 async fn search_ok() -> Html<&'static str> {

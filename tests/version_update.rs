@@ -1,4 +1,4 @@
-use reader_rust::service::update_service::{
+use xread::service::update_service::{
     build_update_info, is_newer_version, GithubRelease, UpdatePreferences,
 };
 

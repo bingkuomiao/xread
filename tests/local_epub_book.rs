@@ -1,4 +1,4 @@
-use reader_rust::service::local_epub_book::LocalEpubBookService;
+use xread::service::local_epub_book::LocalEpubBookService;
 use std::io::{Cursor, Write};
 use zip::write::FileOptions;
 

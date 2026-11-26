@@ -1,5 +1,5 @@
-use reader_rust::crawler::url_analyzer::analyze_url;
-use reader_rust::model::book_source::BookSource;
+use xread::crawler::url_analyzer::analyze_url;
+use xread::model::book_source::BookSource;
 
 const FIXTURE: &str = "/tmp/gy_clean.json";
 
