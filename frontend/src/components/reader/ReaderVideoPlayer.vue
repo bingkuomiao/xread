@@ -21,9 +21,25 @@
             <path d="M18 6 6 18M6 6l12 12" />
           </svg>
         </button>
+
+        <!-- 右上角更多：从底部控制栏移出，点它唤出画面/速度/开关面板。跟随控制层显隐 -->
+        <button
+          class="rv-more-top-btn rv-glass-btn"
+          :class="{ 'is-hidden': !controlsVisible }"
+          aria-label="更多设置"
+          @click.stop="toggleMorePanel"
+        >
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+        </button>
       </Teleport>
 
       <div class="reader-artplayer-container" ref="artContainerRef"></div>
+
+      <!-- 视频加载动画：首帧就绪前盖住黑屏居中显示，画面出现后立即隐藏 -->
+      <div v-if="videoLoading" class="rv-loading-mask" aria-label="视频加载中">
+        <div class="rv-loading-spinner"></div>
+        <div class="rv-loading-text">加载中…</div>
+      </div>
 
       <!-- 更多面板：Teleport 进 ArtPlayer 的 .art-video-player 内部，
            这样原生全屏时它随全屏元素一起显示（否则作为兄弟节点会被浏览器隐藏） -->
@@ -139,6 +155,9 @@ const boxHeight = ref<number | null>(null)
 const titleHidden = ref(false)
 // 控制层是否可见：由 ArtPlayer 的 control 事件驱动，统一控制标题/关闭按钮/更多面板/迷你进度条
 const controlsVisible = ref(true)
+// 视频首帧是否就绪：就绪前显示居中加载动画，就绪后隐藏
+const videoLoading = ref(true)
+let loadingFallbackTimer: number | null = null
 
 // 更多面板 / 选集面板与播放选项（两者互斥，同时最多显示一个）
 const morePanelVisible = ref(false)
@@ -272,6 +291,46 @@ function closeAllPanels() {
   morePanelVisible.value = false
   catalogPanelVisible.value = false
 }
+
+/**
+ * 点击视频以外的页面区域时，强制收起所有屏幕控制元素：
+ * 面板、标题、关闭/更多按钮，以及 ArtPlayer 底部控制栏与进度条。
+ * 做法：给 .art-video-player 加一个自定义 class，用更高特异性 CSS 覆盖控制栏显示
+ * （不碰 ArtPlayer 内部的 art-control-show 状态，避免与之失步）。
+ */
+function forceHideControls() {
+  closeAllPanels()
+  controlsVisible.value = false
+  titleHidden.value = true
+  if (playerHost.value) playerHost.value.classList.add('rv-force-hide')
+}
+
+/** 点回播放器内部：移除强制隐藏，让 ArtPlayer 恢复自己的控制层显隐逻辑。 */
+function clearForcedHide() {
+  if (playerHost.value) playerHost.value.classList.remove('rv-force-hide')
+}
+
+/** document 级手势：点在播放器（含 Teleport 面板）之外则强制隐藏控制层。 */
+function onDocumentPointerDown(event: PointerEvent) {
+  const container = artContainerRef.value
+  const target = event.target as Node | null
+  if (!container || !target) return
+  if (container.contains(target)) {
+    clearForcedHide()
+  } else {
+    forceHideControls()
+  }
+}
+
+/** 首帧就绪：隐藏加载动画，并清理兜底定时器（多次调用幂等）。 */
+function markVideoReady() {
+  if (!videoLoading.value) return
+  videoLoading.value = false
+  if (loadingFallbackTimer !== null) {
+    window.clearTimeout(loadingFallbackTimer)
+    loadingFallbackTimer = null
+  }
+}
 function toggleMorePanel() {
   const show = !morePanelVisible.value
   morePanelVisible.value = show
@@ -328,6 +387,11 @@ function initPlayer() {
     art = null
   }
   destroyHls()
+  if (loadingFallbackTimer !== null) {
+    window.clearTimeout(loadingFallbackTimer)
+    loadingFallbackTimer = null
+  }
+  videoLoading.value = true
   videoRatio.value = null
   boxWidth.value = null
   boxHeight.value = null
@@ -369,8 +433,8 @@ function initPlayer() {
     autoOrientation: false,
     theme: '#3b82f6',
     lang: 'zh-cn',
-    // 左侧自定义键全部去掉；
-    // 右侧保留：全屏 + 选集（目录图标）+ 更多。
+    // 左侧自定义键全部去掉；更多按钮已移到右上角独立按钮。
+    // 底部控制栏右侧仅保留：全屏 + 选集（目录图标）。
     controls: [
       {
         name: 'native-fullscreen',
@@ -394,15 +458,6 @@ function initPlayer() {
           </svg>
         </button>`,
         click: () => toggleCatalogPanel(),
-      },
-      {
-        name: 'more',
-        index: 72,
-        position: 'right',
-        html: `<button class="art-custom-btn rv-glass-btn" title="更多">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
-        </button>`,
-        click: () => toggleMorePanel(),
       },
     ],
     customType: {
@@ -461,9 +516,20 @@ function initPlayer() {
   art.on('video:loadedmetadata', () => {
     fitToVideo()
   })
+  // 首帧可播放：画面即将出现，隐藏加载动画
   art.on('video:canplay', () => {
     fitToVideo()
+    markVideoReady()
   })
+  art.on('video:playing', () => {
+    markVideoReady()
+  })
+  // 兜底：极端情况下 canplay/playing 均未触发（如弱网、部分 WebView），
+  // 10 秒后仍隐藏遮罩，避免永久转圈挡住画面。
+  loadingFallbackTimer = window.setTimeout(() => {
+    loadingFallbackTimer = null
+    markVideoReady()
+  }, 10_000)
 
   // 控制层显示/隐藏：统一驱动标题、关闭按钮、更多面板、迷你进度条的显隐。
   // 面板跟随控制层一同隐藏——控制层 3 秒无操作自动收起时，面板也一起消失，不长期驻留。
@@ -510,6 +576,8 @@ watch(
 onMounted(() => {
   initPlayer()
   window.addEventListener('resize', onWindowResize)
+  // 点击视频外页面区域时收起所有屏幕控制元素
+  document.addEventListener('pointerdown', onDocumentPointerDown)
   const holder = artContainerRef.value?.parentElement?.parentElement
   if (holder && typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => {
@@ -521,7 +589,12 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   destroyHls()
+  if (loadingFallbackTimer !== null) {
+    window.clearTimeout(loadingFallbackTimer)
+    loadingFallbackTimer = null
+  }
   window.removeEventListener('resize', onWindowResize)
+  document.removeEventListener('pointerdown', onDocumentPointerDown)
   if (resizeObserver) {
     resizeObserver.disconnect()
     resizeObserver = null
@@ -597,6 +670,60 @@ onBeforeUnmount(() => {
 }
 .rv-close-btn.is-hidden { opacity: 0; pointer-events: none; }
 .rv-close-btn:active { opacity: 0.7; }
+
+/* 右上角更多按钮：贴右上、玻璃圆底，跟随控制层淡出 */
+.rv-more-top-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 95;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: #fff;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.12), 0 2px 8px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  -webkit-tap-highlight-color: transparent;
+  transition: opacity 0.3s ease, background 0.15s ease;
+}
+.rv-more-top-btn.is-hidden { opacity: 0; pointer-events: none; }
+.rv-more-top-btn:active { background: rgba(255, 255, 255, 0.22); }
+
+/* 加载遮罩：盖在播放器之上、面板之下，首帧就绪前居中显示旋转动画 */
+.rv-loading-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  pointer-events: none;
+}
+.rv-loading-spinner {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--color-primary, #f43f5e);
+  animation: rv-spin 0.8s linear infinite;
+}
+.rv-loading-text {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  letter-spacing: 1px;
+}
+@keyframes rv-spin {
+  to { transform: rotate(360deg); }
+}
 
 /* ===== 玻璃拟态公共样式：视频面板与按钮统一增强玻璃感（深色玻璃，适配黑色播放底） ===== */
 .rv-glass {
@@ -754,6 +881,20 @@ onBeforeUnmount(() => {
 .reader-artplayer-container :deep(.art-video-player.art-mini-progress-bar .art-bottom) {
   opacity: 0 !important;
   pointer-events: none;
+}
+
+/* 点击视频外页面区域后强制隐藏：底部控制栏（含进度条/时间/按钮）、迷你进度条、遮罩。
+   用自定义 class + 更高特异性覆盖，不动 ArtPlayer 内部 art-control-show 状态，
+   点回播放器内移除本 class 即可让 ArtPlayer 自行恢复，避免显隐失步。 */
+.reader-artplayer-container :deep(.art-video-player.rv-force-hide .art-bottom),
+.reader-artplayer-container :deep(.art-video-player.rv-force-hide .art-progress) {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+.reader-artplayer-container :deep(.art-video-player.rv-force-hide .art-mask),
+.reader-artplayer-container :deep(.art-video-player.rv-force-hide .art-state) {
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 @media (max-width: 768px) {
