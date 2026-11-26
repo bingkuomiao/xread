@@ -57,14 +57,14 @@
             </button>
             <div v-if="showDropdown" class="category-menu">
               <button
-                v-for="item in categories"
-                :key="item.value"
+                v-for="name in categories"
+                :key="name"
                 type="button"
                 class="category-item"
-                :class="{ active: currentCategory === item.value }"
-                @click.stop="selectCategory(item.value)"
+                :class="{ active: currentCategory === name }"
+                @click.stop="selectCategory(name)"
               >
-                {{ item.label }}
+                {{ name }}
               </button>
             </div>
           </div>
@@ -119,19 +119,15 @@ const searchValue = ref('')
 const showDropdown = ref(false)
 const dropdownRef = ref<HTMLElement | null>(null)
 
-type CategoryType = 'novel' | 'skit' | 'manga' | 'audio'
-
-const categories: { label: string; value: CategoryType }[] = [
-  { label: '小说', value: 'novel' },
-  { label: '短剧', value: 'skit' },
-  { label: '漫画', value: 'manga' },
-  { label: '有声', value: 'audio' },
-]
+// 搜索分类下拉与书架横向分类共用同一份「用户自定义分组」（全部/小说/漫画/…/其它），
+// 不再使用写死的 novel/skit/manga/audio。值即分组名，与 Shelf Group Tabs 完全一致。
+const categories = computed(() => shelfStore.displayGroups.map((g) => g.groupName))
 
 const currentCategory = computed(() => shelfStore.searchCategory)
 const currentCategoryLabel = computed(() => {
-  const match = categories.find((c) => c.value === currentCategory.value)
-  return match ? match.label : '小说'
+  // 兼容旧值：若存的是已废弃的英文枚举，回落显示为「全部」
+  const legacy = ['novel', 'skit', 'manga', 'audio']
+  return legacy.includes(currentCategory.value) ? '全部' : (currentCategory.value || '全部')
 })
 
 const inputPlaceholder = computed(() => {
@@ -142,7 +138,7 @@ function toggleDropdown() {
   showDropdown.value = !showDropdown.value
 }
 
-function selectCategory(cat: CategoryType) {
+function selectCategory(cat: string) {
   shelfStore.searchCategory = cat
   showDropdown.value = false
   // 如果当前已经有搜索词且在搜索结果中，直接触发重新搜索
@@ -181,10 +177,26 @@ function handleSearch() {
   const value = searchValue.value.trim()
   if (!value) return
 
-  shelfStore.startSearch(value, {
-    scope: appStore.searchAllByDefault ? 'all' : 'source',
-    sourceUrl: route.path === '/explore' ? exploreStore.activeSourceUrl : '',
-  })
+  // 发现页搜索：使用发现页当前书源
+  if (route.path === '/explore') {
+    shelfStore.startSearch(value, {
+      scope: 'source',
+      sourceUrl: exploreStore.activeSourceUrl,
+    })
+  } else if (shelfStore.searchSourcePinned) {
+    // 会话内用户在搜索页手动指定过书源：沿用当前范围/分组/书源，避免频繁重新选择
+    shelfStore.startSearch(value, {
+      scope: shelfStore.searchScope,
+      group: shelfStore.searchGroup,
+      sourceUrl: shelfStore.searchSourceUrl,
+    })
+  } else {
+    // 首次搜索：遵循「默认搜索全部书源」设置
+    shelfStore.startSearch(value, {
+      scope: appStore.searchAllByDefault ? 'all' : 'source',
+      sourceUrl: '',
+    })
+  }
 
   if (route.path !== '/') {
     router.push('/')

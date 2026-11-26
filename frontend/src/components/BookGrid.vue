@@ -45,8 +45,9 @@
     </TransitionGroup>
     <div
       v-if="touchDragState.started && draggedBook"
+      ref="ghostRef"
       class="touch-drag-ghost"
-      :style="ghostStyle"
+      :style="ghostBaseStyle"
     >
       <BookCard
         :book="draggedBook"
@@ -104,6 +105,11 @@ const draggedUrl = ref('')
 const dropTargetUrl = ref('')
 const touchDropIndex = ref(-1)
 const itemRefs = ref<Record<string, HTMLElement>>({})
+const ghostRef = ref<HTMLElement | null>(null)
+// touchmove 用 rAF 节流到每帧一次处理；ghost 直接改 transform，避免高频触发布局
+let moveRafId: number | null = null
+let latestTouchX = 0
+let latestTouchY = 0
 const touchDragState = ref({
   active: false,
   started: false,
@@ -128,7 +134,19 @@ const touchDragMetrics = ref({
   itemHeight: 0,
   gap: 16,
 })
-const flipAnimationDurationMs = 680
+// 命中测试的 rect 缓存：长按开始时采集一次（视口坐标），避免 touchmove 中反复读布局。
+interface CachedRect {
+  index: number
+  bookUrl: string
+  left: number
+  top: number
+  right: number
+  bottom: number
+  width: number
+  height: number
+}
+const cachedRects = ref<CachedRect[]>([])
+let cachedScrollTop = 0
 const edgeScrollThresholdPx = 140
 const maxAutoScrollStepPx = 24
 
@@ -199,41 +217,6 @@ function setItemRef(el: Element | { $el?: Element } | null, bookUrl: string) {
   }
 }
 
-function captureItemRects() {
-  const rects = new Map<string, DOMRect>()
-  for (const item of displayItems.value) {
-    const key = getDisplayKey(item)
-    if (!key) continue
-    const rect = itemRefs.value[key]?.getBoundingClientRect()
-    if (rect) {
-      rects.set(key, rect)
-    }
-  }
-  return rects
-}
-
-function playFlipAnimation(previousRects: Map<string, DOMRect>) {
-  for (const [bookUrl, prevRect] of previousRects.entries()) {
-    const el = itemRefs.value[bookUrl]
-    if (!el) continue
-    const nextRect = el.getBoundingClientRect()
-    const deltaX = prevRect.left - nextRect.left
-    const deltaY = prevRect.top - nextRect.top
-    if (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) continue
-
-    el.style.transition = 'none'
-    el.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0)`
-    void el.offsetWidth
-    el.style.transition = `transform ${flipAnimationDurationMs}ms cubic-bezier(0.22, 0.8, 0.22, 1)`
-    el.style.transform = ''
-    window.setTimeout(() => {
-      if (el.style.transform === '') {
-        el.style.transition = ''
-      }
-    }, flipAnimationDurationMs)
-  }
-}
-
 function handleTouchStart(event: TouchEvent, book: Book | SearchBook) {
   if (!props.sortable || event.touches.length !== 1) return
   const touch = event.touches[0]
@@ -254,17 +237,42 @@ function handleTouchStart(event: TouchEvent, book: Book | SearchBook) {
     if (!touchDragState.value.active || !draggedUrl.value) return
     touchDragState.value.started = true
     measureTouchDragMetrics(draggedUrl.value, touch.clientX, touch.clientY)
+    // 长按开始时立即采集一次 rect（此时还没插入占位块，读到的是稳定布局）
+    captureCachedRects()
   }, 220)
 }
 
-function resolveTouchDropIndex(clientX: number, clientY: number) {
-  const remainingBooks = getRemainingBooks()
-  const entries = remainingBooks
+// 采集剩余卡片的矩形到缓存（仅在长按开始、占位块移动后调用，而非每帧）。
+function captureCachedRects() {
+  const container = getScrollContainer()
+  cachedScrollTop = container.scrollTop || 0
+  cachedRects.value = getRemainingBooks()
     .map((book, index) => {
       const rect = itemRefs.value[getBookUrl(book)]?.getBoundingClientRect()
-      return rect ? { index, rect, bookUrl: getBookUrl(book) } : null
+      return rect
+        ? {
+            index,
+            bookUrl: getBookUrl(book),
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height,
+          }
+        : null
     })
-    .filter((entry): entry is { index: number; rect: DOMRect; bookUrl: string } => Boolean(entry))
+    .filter((entry): entry is CachedRect => Boolean(entry))
+}
+
+function resolveTouchDropIndex(clientX: number, clientY: number) {
+  const remainingCount = getRemainingBooks().length
+  // 缓存是采集时刻的视口坐标；自动滚动后按 scrollTop 差值平移到当前坐标系
+  const scrollDelta = (getScrollContainer().scrollTop || 0) - cachedScrollTop
+  const entries = cachedRects.value.map((entry) => ({
+    ...entry,
+    rect: { ...entry, top: entry.top - scrollDelta, bottom: entry.bottom - scrollDelta },
+  }))
 
   const containing = entries.find(({ rect }) => (
     clientX >= rect.left &&
@@ -279,7 +287,7 @@ function resolveTouchDropIndex(clientX: number, clientY: number) {
   }
 
   const sortedByTop = entries.slice().sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left)
-  const rowGroups: Array<Array<{ index: number; rect: DOMRect; bookUrl: string }>> = []
+  const rowGroups: Array<Array<{ index: number; rect: CachedRect; bookUrl: string }>> = []
   for (const entry of sortedByTop) {
     const lastRow = rowGroups[rowGroups.length - 1]
     if (!lastRow || Math.abs(lastRow[0]!.rect.top - entry.rect.top) > entry.rect.height * 0.5) {
@@ -307,7 +315,7 @@ function resolveTouchDropIndex(clientX: number, clientY: number) {
   const last = sortedByTop[sortedByTop.length - 1]
   if (!first || !last) return -1
   if (clientY < first.rect.top) return 0
-  if (clientY > last.rect.bottom) return remainingBooks.length
+  if (clientY > last.rect.bottom) return remainingCount
 
   let closestIndex = 0
   let closestDistance = Number.POSITIVE_INFINITY
@@ -329,8 +337,6 @@ function handleTouchMove(event: TouchEvent) {
   if (!touch) return
   const deltaX = touch.clientX - touchDragState.value.startX
   const deltaY = touch.clientY - touchDragState.value.startY
-  touchDragState.value.offsetX = deltaX
-  touchDragState.value.offsetY = deltaY
   if (!touchDragState.value.started) {
     if (Math.abs(deltaX) > 10 || Math.abs(deltaY) > 10) {
       handleTouchCancel()
@@ -338,12 +344,34 @@ function handleTouchMove(event: TouchEvent) {
     return
   }
   event.preventDefault()
-  updateAutoScroll(touch.clientY)
-  const targetIndex = resolveTouchDropIndex(touch.clientX, touch.clientY)
+  // 记录最新触点，用 rAF 合并到每帧一次处理，避免 touchmove 高频（可达 120Hz）触发重复计算
+  latestTouchX = touch.clientX
+  latestTouchY = touch.clientY
+  if (moveRafId === null) {
+    moveRafId = window.requestAnimationFrame(flushDragFrame)
+  }
+}
+
+// 每帧只处理一次：ghost 直接改 transform（合成层，不触发 Vue 重渲染与布局），
+// 命中测试基于长按开始时缓存的 rect，避免对每个卡片反复 getBoundingClientRect 造成卡顿。
+function flushDragFrame() {
+  moveRafId = null
+  if (!touchDragState.value.started) return
+
+  const ghost = ghostRef.value
+  if (ghost) {
+    // left/top 已定位到按下时的基准点，这里只叠加相对位移
+    const dx = latestTouchX - touchDragState.value.startX
+    const dy = latestTouchY - touchDragState.value.startY
+    ghost.style.transform = `translate3d(${dx}px, ${dy}px, 0) scale(1.04)`
+  }
+
+  updateAutoScroll(latestTouchY)
+  const targetIndex = resolveTouchDropIndex(latestTouchX, latestTouchY)
   if (targetIndex !== -1 && targetIndex !== touchDropIndex.value) {
-    const previousRects = captureItemRects()
     touchDropIndex.value = targetIndex
-    nextTick(() => playFlipAnimation(previousRects))
+    // 占位块移动后重新采集 rect，保证后续命中测试基于最新布局
+    nextTick(() => captureCachedRects())
   }
 }
 
@@ -375,6 +403,11 @@ function handleTouchEnd() {
 function handleTouchCancel() {
   clearLongPressTimer()
   stopAutoScroll()
+  if (moveRafId !== null) {
+    window.cancelAnimationFrame(moveRafId)
+    moveRafId = null
+  }
+  cachedRects.value = []
   touchDragState.value.active = false
   touchDragState.value.started = false
   touchDragState.value.offsetX = 0
@@ -432,8 +465,8 @@ function stopAutoScroll() {
 
 function measureTouchDragMetrics(bookUrl: string, clientX?: number, clientY?: number) {
   const item = itemRefs.value[bookUrl]
-  const itemHeight = item?.getBoundingClientRect().height || 0
   const rect = item?.getBoundingClientRect()
+  const itemHeight = rect?.height || 0
   const grid = item?.parentElement
   const style = grid ? window.getComputedStyle(grid) : null
   const gap = style ? parseFloat(style.rowGap || style.gap || '16') : 16
@@ -483,13 +516,12 @@ const displayItems = computed<DisplayItem[]>(() => {
   return next
 })
 
-const ghostStyle = computed(() => {
+// ghost 基准样式：尺寸固定，位置由 flushDragFrame 直接写 transform（合成层，不触发响应式重渲染）。
+const ghostBaseStyle = computed(() => {
   const dragged = draggedBook.value
   if (!dragged || !touchDragState.value.started) return undefined
-  const currentPointerX = touchDragState.value.startX + touchDragState.value.offsetX
-  const currentPointerY = touchDragState.value.startY + touchDragState.value.offsetY
-  const x = currentPointerX - dragPointerOffset.value.x
-  const y = currentPointerY - dragPointerOffset.value.y
+  const x = touchDragState.value.startX - dragPointerOffset.value.x
+  const y = touchDragState.value.startY - dragPointerOffset.value.y
   return {
     left: `${x}px`,
     top: `${y}px`,
@@ -518,10 +550,11 @@ const ghostStyle = computed(() => {
   max-width: 420px;
   height: 100%;
   transition:
-    transform 820ms cubic-bezier(0.16, 0.84, 0.2, 1),
-    filter 700ms ease,
-    opacity 700ms ease;
+    transform 240ms cubic-bezier(0.22, 0.8, 0.22, 1),
+    filter 240ms ease,
+    opacity 240ms ease;
   transform-origin: center center;
+  will-change: transform;
 }
 
 .book-grid-item.drop-target :deep(.book-card) {
@@ -610,10 +643,10 @@ const ghostStyle = computed(() => {
 
 /* Card transition group */
 .card-enter-active {
-  transition: all 820ms cubic-bezier(0.16, 0.84, 0.2, 1);
+  transition: all 240ms cubic-bezier(0.22, 0.8, 0.22, 1);
 }
 .card-leave-active {
-  transition: all 360ms ease-out;
+  transition: all 200ms ease-out;
 }
 .card-enter-from {
   opacity: 0;
@@ -624,7 +657,7 @@ const ghostStyle = computed(() => {
   transform: scale(0.95);
 }
 .card-move {
-  transition: transform 820ms cubic-bezier(0.16, 0.84, 0.2, 1);
+  transition: transform 240ms cubic-bezier(0.22, 0.8, 0.22, 1);
 }
 
 .touch-drag-ghost {
@@ -632,6 +665,7 @@ const ghostStyle = computed(() => {
   z-index: 30;
   pointer-events: none;
   transform: scale(1.04);
+  will-change: transform;
   filter: drop-shadow(0 18px 24px rgba(0, 0, 0, 0.18));
 }
 

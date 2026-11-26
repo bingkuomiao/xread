@@ -26,7 +26,7 @@
       />
       <div v-else class="cover-placeholder">
         <span class="cover-title">{{ book.name }}</span>
-        <span class="cover-author">{{ book.author }}</span>
+        <span v-if="displayAuthor" class="cover-author">{{ displayAuthor }}</span>
       </div>
 
       <!-- Unread badge -->
@@ -50,8 +50,8 @@
         <div class="title-block">
           <h3 class="book-name">{{ book.name }}</h3>
           <div class="book-meta">
-            <span class="book-author">{{ book.author || '未知作者' }}</span>
-            <span v-if="asBook.totalChapterNum" class="meta-dot">·</span>
+            <span v-if="displayAuthor" class="book-author">{{ displayAuthor }}</span>
+            <span v-if="displayAuthor && asBook.totalChapterNum" class="meta-dot">·</span>
             <span v-if="asBook.totalChapterNum" class="book-chapters">共{{ asBook.totalChapterNum }}章</span>
           </div>
         </div>
@@ -96,10 +96,11 @@
       </div>
 
       <div class="card-footer">
-        <div v-if="!isSearch && (browserCachedCount > 0 || serverCachedCount > 0 || groupName)" class="book-cache-row">
+        <div v-if="!isSearch && (isLocalBookEntry || browserCachedCount > 0 || serverCachedCount > 0 || groupName)" class="book-cache-row">
           <span v-if="groupName" class="cache-chip group-chip">#{{ groupName }}</span>
           <span v-if="browserCachedCount > 0" class="cache-chip primary">离线 {{ browserCachedCount }} 章</span>
           <span v-if="serverCachedCount > 0" class="cache-chip">服务端 {{ serverCachedCount }} 章</span>
+          <span v-if="isLocalBookEntry" class="cache-chip local-chip">本地导入</span>
         </div>
         <!-- Search mode: add to shelf -->
         <button
@@ -118,7 +119,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { getCoverUrl } from '../api/bookshelf'
 import { isLocalBook } from '../utils/localBook'
 import { useBookshelfStore } from '../stores/bookshelf'
@@ -169,6 +170,12 @@ function handleCoverClick() {
 
 const coverFailed = ref(false)
 
+// 封面地址变化（如同书多源封面择优替换了串图/缺封面）时，重置失败标记以重新加载新封面。
+watch(
+  () => (props.book as Book).customCoverUrl || props.book.coverUrl,
+  () => { coverFailed.value = false },
+)
+
 const asBook = computed(() => props.book as Book)
 const asSearchBook = computed(() => props.book as SearchBook)
 
@@ -187,6 +194,15 @@ const unreadCount = computed(() => {
 
 const browserCachedCount = computed(() => isLocalBook(asBook.value) ? 0 : Math.max(0, asBook.value.browserCachedChapterCount || 0))
 const serverCachedCount = computed(() => isLocalBook(asBook.value) ? 0 : Math.max(0, asBook.value.cachedChapterCount || 0))
+const isLocalBookEntry = computed(() => !props.isSearch && isLocalBook(asBook.value))
+
+// 本地书的作者是占位值"本地导入"时，作者位不再显示，改由底部"本地导入"chip 表达；
+// 补全成功后作者被写回真实姓名，则照常显示在作者位。
+const displayAuthor = computed(() => {
+  const author = (asBook.value.author || '').trim()
+  if (isLocalBookEntry.value && (author === '本地导入' || author === '佚名')) return ''
+  return author || '未知作者'
+})
 const latestChapterText = computed(() => {
   if (props.isSearch) {
     return asSearchBook.value.lastChapter || asBook.value.latestChapterTitle || ''
@@ -687,6 +703,11 @@ const bookIntro = computed(() => {
 .cache-chip.primary {
   background: color-mix(in srgb, var(--color-primary) 13%, transparent);
   color: var(--color-primary);
+}
+
+.cache-chip.local-chip {
+  background: var(--color-bg-sunken);
+  color: var(--color-text-tertiary);
 }
 
 .ai-entry-btn {

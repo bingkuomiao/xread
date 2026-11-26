@@ -80,7 +80,7 @@
                 <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
                 <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
               </svg>
-              {{ (book as Book).durChapterIndex ? '继续阅读' : '开始阅读' }}
+              {{ (book as Book).durChapterIndex ? '继续' : '阅读' }}
             </button>
             <button class="action-btn" @click="openAiBook">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
@@ -92,7 +92,18 @@
               </svg>
               AI资料
             </button>
-            <button class="action-btn" @click="close">关闭</button>
+            <button class="action-btn danger" @click="deleteBook">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                <path d="M3 6h18M19 6v14a3 3 0 0 1-3-3H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+              </svg>
+              删除
+            </button>
+            <button class="action-btn" @click="close">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+              关闭
+            </button>
           </div>
         </div>
       </div>
@@ -104,6 +115,7 @@
 import { ref, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { getCoverUrl, getChapterList } from '../api/bookshelf'
+import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import type { Book, SearchBook, BookChapter } from '../types'
@@ -120,6 +132,7 @@ const emit = defineEmits<{
 const router = useRouter()
 const readerStore = useReaderStore()
 const shelfStore = useBookshelfStore()
+const appStore = useAppStore()
 
 const coverFailed = ref(false)
 const chapters = ref<BookChapter[]>([])
@@ -137,22 +150,8 @@ const displayChapters = computed(() => {
   return chapters.value.slice(0, 50)
 })
 
-// 书源返回的简介常包裹 HTML（如 <div class="content-intro">、<p class="detail-btn">），
-// 直接显示会把标签当纯文本。这里先还原字面量转义字符（如反斜杠 n/r/t），
-// 再剥掉标签、压缩空白，<br> 与块级标签转成换行后保留为纯文本。
-const plainIntro = computed(() => {
-  const src = props.book?.intro
-  if (!src) return ''
-  const raw = src.replace(/\\n|\\r/g, '\n').replace(/\\t/g, ' ')
-  return raw
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|li|h[1-6])>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-})
+// 书籍数据已在入口统一清洗（intro 保留换行），这里直接显示即可。
+const plainIntro = computed(() => props.book?.intro || '')
 
 watch(() => props.modelValue, async (visible) => {
   if (visible && props.book) {
@@ -209,6 +208,19 @@ function openAiBook() {
     name: 'ai-book',
     query: { bookUrl: b.bookUrl },
   })
+}
+
+async function deleteBook() {
+  if (!props.book) return
+  const b = props.book as Book
+  if (!confirm(`确定从书架删除 "${b.name}"？`)) return
+  try {
+    close()
+    await shelfStore.removeBook(b)
+    appStore.showToast(`已删除 "${b.name}"`, 'success')
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message, 'error')
+  }
 }
 </script>
 
@@ -470,6 +482,7 @@ function openAiBook() {
 
 .modal-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
   margin-top: var(--space-6);
   padding-top: var(--space-5);
@@ -477,7 +490,7 @@ function openAiBook() {
 }
 
 .action-btn {
-  flex: 1;
+  flex: 1 1 110px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -503,5 +516,13 @@ function openAiBook() {
 
 .action-btn.primary:hover {
   background: var(--color-primary-dark);
+}
+
+.action-btn.danger {
+  color: var(--color-danger, #d93025);
+}
+
+.action-btn.danger:hover {
+  background: color-mix(in srgb, var(--color-danger, #d93025) 12%, var(--color-bg));
 }
 </style>
