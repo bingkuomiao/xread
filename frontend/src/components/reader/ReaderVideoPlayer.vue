@@ -24,7 +24,7 @@
 
         <!-- 右上角更多：从底部控制栏移出，点它唤出画面/速度/开关面板。跟随控制层显隐 -->
         <button
-          class="rv-more-top-btn rv-glass-btn"
+          class="rv-more-top-btn"
           :class="{ 'is-hidden': !controlsVisible }"
           aria-label="更多设置"
           @click.stop="toggleMorePanel"
@@ -83,13 +83,11 @@
         <div v-if="catalogPanelVisible" class="rv-catalog-backdrop" @click.stop="closeCatalogPanel"></div>
         <div v-if="catalogPanelVisible" class="rv-catalog-panel rv-glass" :class="{ 'is-hidden': !controlsVisible }" @click.stop>
           <div class="rv-more-title">选集</div>
-          <div class="rv-more-row">
+          <div class="rv-catalog-list">
             <button :disabled="!props.hasPrev" @click="onMorePrev">上一集</button>
             <button @click="onMoreCatalog">目录</button>
             <button :disabled="!props.hasNext" @click="onMoreNext">下一集</button>
-          </div>
-          <div class="rv-more-row rv-more-download">
-            <button @click="downloadCurrentVideo">下载本集</button>
+            <button @click="downloadCurrentVideo">下载</button>
           </div>
         </div>
       </Teleport>
@@ -153,7 +151,9 @@ const boxWidth = ref<number | null>(null)
 const boxHeight = ref<number | null>(null)
 
 const titleHidden = ref(false)
-// 控制层是否可见：由 ArtPlayer 的 control 事件驱动，统一控制标题/关闭按钮/更多面板/迷你进度条
+// 控制层是否可见：由 ArtPlayer 的 control 事件驱动。
+// 顶部关闭/更多按钮、底部选集/全屏按钮统一跟随它显隐——一起出现、一起隐藏，
+// 彻底避免「上面按钮显示、下面控制栏隐藏」这种不同步状态。
 const controlsVisible = ref(true)
 // 视频首帧是否就绪：就绪前显示居中加载动画，就绪后隐藏
 const videoLoading = ref(true)
@@ -305,9 +305,13 @@ function forceHideControls() {
   if (playerHost.value) playerHost.value.classList.add('rv-force-hide')
 }
 
-/** 点回播放器内部：移除强制隐藏，让 ArtPlayer 恢复自己的控制层显隐逻辑。 */
+/** 点回播放器内部：移除强制隐藏，让顶部按钮与控制栏一起恢复显示。 */
 function clearForcedHide() {
   if (playerHost.value) playerHost.value.classList.remove('rv-force-hide')
+  // 与 control 事件保持同一套状态：移除强制隐藏的同时恢复控制层显隐，
+  // 确保顶部按钮和底部控制栏同步出现，不出现「上显示、下隐藏」。
+  controlsVisible.value = true
+  titleHidden.value = false
 }
 
 /** document 级手势：点在播放器（含 Teleport 面板）之外则强制隐藏控制层。 */
@@ -398,6 +402,7 @@ function initPlayer() {
   morePanelVisible.value = false
   catalogPanelVisible.value = false
   controlsVisible.value = true
+  titleHidden.value = false
   playerHost.value = null
 
   const isM3u8 = /\.m3u8(?:\?|$)/i.test(props.url)
@@ -438,7 +443,7 @@ function initPlayer() {
     controls: [
       {
         name: 'native-fullscreen',
-        index: 70,
+        index: 71,
         position: 'right',
         html: `<button class="art-custom-btn rv-glass-btn" title="全屏">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -449,7 +454,7 @@ function initPlayer() {
       },
       {
         name: 'catalog',
-        index: 71,
+        index: 70,
         position: 'right',
         html: `<button class="art-custom-btn rv-glass-btn" title="选集">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -531,19 +536,29 @@ function initPlayer() {
     markVideoReady()
   }, 10_000)
 
-  // 控制层显示/隐藏：统一驱动标题、关闭按钮、更多面板、迷你进度条的显隐。
-  // 面板跟随控制层一同隐藏——控制层 3 秒无操作自动收起时，面板也一起消失，不长期驻留。
+  // 控制层显隐：顶部关闭/更多按钮、底部选集/全屏按钮、章节标题、更多/选集面板
+  // 全部由同一个 control 事件统一驱动——一起出现、一起隐藏，不再各用一套状态，
+  // 彻底避免「上面按钮显示、下面控制栏隐藏」这种不同步。
   art.on('control', (state: boolean) => {
+    if (state) {
+      // 控制层被唤出（hover / 点击 / 暂停）：同步清除强制隐藏 class，
+      // 让底部控制栏与顶部按钮一起恢复，避免顶部已显示、底部仍被 CSS 压住。
+      if (playerHost.value) playerHost.value.classList.remove('rv-force-hide')
+    }
     controlsVisible.value = state
     titleHidden.value = !state
     if (!state) closeAllPanels()
   })
 
-  art.on('video:play', () => {
-    titleHidden.value = true
+  // ArtPlayer 在 play()/pause() 内部先写 notice（"播放"/"暂停"）再 emit 对应事件，
+  // 这两条提示会与左上角章节标题重叠。事件回调里立即清空 notice 即可去掉文字，
+  // 且不影响下载成功、流加载失败等其它提示（它们不走 play/pause）。
+  // 注意：这里不再单独控制任何按钮/标题的显隐，一律交给上面的 control 事件，保证同步。
+  art.on('play', () => {
+    if (art) art.notice.show = ''
   })
-  art.on('video:pause', () => {
-    titleHidden.value = false
+  art.on('pause', () => {
+    if (art) art.notice.show = ''
   })
 
   art.on('video:timeupdate', () => {
@@ -649,52 +664,32 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-/* 左上角关闭按钮：贴边、无底色圆形背景、仅保留带描边的叉；跟随控制层淡出 */
-.rv-close-btn {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  z-index: 95;
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: #fff;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.9));
-  transition: opacity 0.3s ease;
-}
-.rv-close-btn.is-hidden { opacity: 0; pointer-events: none; }
-.rv-close-btn:active { opacity: 0.7; }
-
-/* 右上角更多按钮：贴右上、玻璃圆底，跟随控制层淡出 */
+/* 左上角关闭 / 右上角更多：无底色透明按钮，与播放画面融为一体；
+   左右各内缩，与底部控制栏的播放/全屏按钮对齐，不过于贴边；跟随控制层淡出 */
+.rv-close-btn,
 .rv-more-top-btn {
   position: absolute;
-  top: 2px;
-  right: 2px;
+  top: 6px;
   z-index: 95;
   width: 36px;
   height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
   color: #fff;
   cursor: pointer;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.12), 0 2px 8px rgba(0, 0, 0, 0.3);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: transparent;
+  border: none;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.9));
   -webkit-tap-highlight-color: transparent;
-  transition: opacity 0.3s ease, background 0.15s ease;
+  transition: opacity 0.3s ease;
 }
+.rv-close-btn { left: 12px; }
+.rv-more-top-btn { right: 12px; }
+.rv-close-btn.is-hidden,
 .rv-more-top-btn.is-hidden { opacity: 0; pointer-events: none; }
-.rv-more-top-btn:active { background: rgba(255, 255, 255, 0.22); }
+.rv-close-btn:active,
+.rv-more-top-btn:active { opacity: 0.7; }
 
 /* 加载遮罩：盖在播放器之上、面板之下，首帧就绪前居中显示旋转动画 */
 .rv-loading-mask {
@@ -745,12 +740,10 @@ onBeforeUnmount(() => {
 .rv-more-panel,
 .rv-catalog-panel {
   position: absolute;
-  right: 10px;
-  bottom: 52px;
+  right: 12px;
   z-index: 100;
   width: 232px;
-  max-width: calc(100% - 20px);
-  max-height: calc(100% - 64px);
+  max-width: calc(100% - 24px);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding: 12px;
@@ -758,6 +751,40 @@ onBeforeUnmount(() => {
   color: #fff;
   transition: opacity 0.3s ease;
 }
+/* 更多面板跟随右上角更多按钮，在其正下方展开 */
+.rv-more-panel {
+  top: 50px;
+  max-height: calc(100% - 64px);
+}
+/* 选集面板跟随底部控制栏的选集按钮，在其上方展开。
+   窄列布局：只放一列按钮，宽度刚好容纳文字，不再横向铺开。 */
+.rv-catalog-panel {
+  bottom: 52px;
+  max-height: calc(100% - 64px);
+  width: 128px;
+}
+/* 选集按钮按「上一集→目录→下一集→下载」纵向排列，每个占满整行 */
+.rv-catalog-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rv-catalog-list button {
+  width: 100%;
+  padding: 8px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.rv-catalog-list button:disabled { opacity: 0.35; cursor: default; }
+.rv-catalog-list button:active { opacity: 0.75; }
 .rv-more-panel.is-hidden,
 .rv-catalog-panel.is-hidden { opacity: 0; pointer-events: none; }
 .rv-more-group { margin-bottom: 12px; }
@@ -836,7 +863,7 @@ onBeforeUnmount(() => {
   -webkit-backdrop-filter: blur(12px) saturate(160%);
 }
 
-/* 控制栏自定义按钮（全屏/选集/更多，JS 注入的 .rv-glass-btn）玻璃质感 */
+/* 控制栏自定义按钮（全屏/选集，JS 注入的 .rv-glass-btn）：无底色，与播放画面融为一体 */
 .reader-artplayer-container :deep(.art-video-player .art-controls .art-custom-btn.rv-glass-btn) {
   width: 34px;
   height: 34px;
@@ -845,19 +872,16 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
   color: #fff;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.12), 0 2px 8px rgba(0, 0, 0, 0.3);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: transparent;
+  border: none;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.9));
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-  transition: background 0.15s ease;
+  transition: opacity 0.15s ease;
 }
 .reader-artplayer-container :deep(.art-video-player .art-controls .art-custom-btn.rv-glass-btn:active) {
-  background: rgba(255, 255, 255, 0.22);
+  opacity: 0.7;
 }
 
 /* 修复控制栏最右侧全屏按钮被屏幕边缘裁切：
@@ -904,10 +928,14 @@ onBeforeUnmount(() => {
   .reader-video-title-text {
     font-size: 14px;
   }
-  /* 小屏手机：面板更紧凑，保证在视频区内完整显示 */
-  .rv-more-panel,
-  .rv-catalog-panel {
+  /* 小屏手机：更多面板更紧凑，保证在视频区内完整显示 */
+  .rv-more-panel {
     width: 208px;
+    padding: 10px;
+  }
+  /* 选集面板保持窄列，小屏下也只比桌面略宽一点 */
+  .rv-catalog-panel {
+    width: 120px;
     padding: 10px;
     bottom: 48px;
   }
