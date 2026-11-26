@@ -1,4 +1,5 @@
 import type { Book } from '../types'
+import { sanitizeBook } from './cleanText'
 
 const RECENT_BOOKS_KEY = 'reader-recent-books'
 const MAX_RECENT_BOOKS = 100
@@ -37,8 +38,13 @@ export function loadRecentReadBooks() {
         return now - ts <= RSS_RECENT_TTL_MS
       })
       .sort((a, b) => (b.recentReadAt || b.durChapterTime || 0) - (a.recentReadAt || a.durChapterTime || 0))
-    localStorage.setItem(RECENT_BOOKS_KEY, JSON.stringify(next.slice(0, MAX_RECENT_BOOKS)))
-    return next
+    // 本地历史记录可能是旧版本（无入口清洗时）存入的脏数据，读取时统一清洗一次，
+    // 保证 recentBooks 这条本地链路与 API/SSE 入口产出一致的干净数据。
+    const clean = next
+      .slice(0, MAX_RECENT_BOOKS)
+      .map((entry) => sanitizeBook(entry))
+    localStorage.setItem(RECENT_BOOKS_KEY, JSON.stringify(clean))
+    return clean
   } catch {
     return [] as RecentReadBook[]
   }

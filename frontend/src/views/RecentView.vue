@@ -171,6 +171,7 @@ import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import {
   formatDuration,
+  formatTotalTime,
   getStatsSummary,
   setDailyGoal,
   type BookReadingRecord,
@@ -189,7 +190,9 @@ const showGoalEditor = ref(false)
 const showDetail = ref(false)
 const selectedBook = ref<Book | SearchBook | null>(null)
 const openingBookUrl = ref('')
-const summary = ref(getStatsSummary())
+// 用 computed 而非快照 ref：统计落盘（statsRevision 自增）后自动重算，
+// 与设置页一样实时；无需在各处手动重新赋值。
+const summary = computed(() => getStatsSummary())
 const draftGoal = ref(summary.value.dailyGoalMinutes)
 
 const goalOptions = [
@@ -216,7 +219,7 @@ const avatarText = computed(() => appStore.userInfo?.username?.charAt(0)?.toUppe
 
 const todayText = computed(() => formatDuration(summary.value.todaySeconds))
 const monthText = computed(() => formatDuration(summary.value.monthSeconds))
-const totalText = computed(() => formatDuration(summary.value.totalSeconds))
+const totalText = computed(() => formatTotalTime(summary.value.totalSeconds))
 const activeDaysText = computed(() => `${summary.value.activeDays}天`)
 const goalText = computed(() => formatDuration(summary.value.dailyGoalMinutes * 60))
 
@@ -302,7 +305,6 @@ function openGoalEditor() {
 
 function saveGoal() {
   setDailyGoal(draftGoal.value)
-  summary.value = getStatsSummary()
   showGoalEditor.value = false
 }
 
@@ -364,7 +366,6 @@ async function openRankBook(item: BookReadingRecord) {
 
 async function removeRecent(book: Book) {
   await shelfStore.removeRecentBook(book).catch(() => undefined)
-  summary.value = getStatsSummary()
 }
 
 async function handleClearRecent() {
@@ -374,7 +375,6 @@ async function handleClearRecent() {
 }
 
 onMounted(async () => {
-  summary.value = getStatsSummary()
   await shelfStore.fetchBooks().catch(() => undefined)
   await shelfStore.refreshRecentBooks().catch(() => undefined)
 })

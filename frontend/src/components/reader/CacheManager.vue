@@ -42,8 +42,32 @@
       </div>
 
       <div v-else class="cache-sections">
-        <div v-if="isLocalBookInServer" class="info-card">
-          <p>本地书已存放在服务端书架文件中，不需要额外缓存；阅读时会直接读取上传后的本地文件。</p>
+        <div v-if="isLocalBookInServer" class="info-stack">
+          <section class="cache-section">
+            <div class="section-head">
+              <h4>导出到本地</h4>
+            </div>
+            <div class="option-list">
+              <button class="cache-opt primary" @click="exportWholeBook">
+                <span class="label">全本下载到本地</span>
+              </button>
+            </div>
+          </section>
+          <div class="info-card">
+            <p>本地书已存放在服务端书架文件中，不需要额外缓存；阅读时会直接读取上传后的本地文件。</p>
+          </div>
+          <div class="info-card">
+            <p>本地书的封面、作者和简介会自动静默匹配现有书源，无需额外处理；若未匹配，请检查当前书源是否可以搜到本书。</p>
+          </div>
+          <div class="info-card">
+            <p class="info-card-title">快速匹配建议</p>
+            <p>文件名推荐用规范格式 <b>《书名》 作者：某某.txt</b>（如 <b>《皇明》 作者：某某.txt</b>），书名和作者优先从文件名识别。</p>
+            <p>若文件名不规范（如 <b>皇明.txt</b>），可在正文开头、第一章之前按三行写，同样能识别：</p>
+            <pre class="naming-sample">书名：皇明
+作者：某某
+简介：…</pre>
+            <p>其中简介可省略；封面、作者、简介导入后会自动静默匹配书源补全。</p>
+          </div>
         </div>
 
         <template v-else>
@@ -100,6 +124,18 @@
               </button>
             </div>
           </section>
+
+          <section class="cache-section">
+            <div class="section-head">
+              <h4>导出到本地</h4>
+            </div>
+            <div class="option-list">
+              <!-- 漫画导出 EPUB（图片打包进文件、可重新导入阅读），文字书导出 TXT，文案统一 -->
+              <button class="cache-opt primary" @click="isComic ? exportComicEpub(0) : exportWholeBook()">
+                <span class="label">全本下载到本地</span>
+              </button>
+            </div>
+          </section>
         </template>
       </div>
     </div>
@@ -107,177 +143,41 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useReaderStore } from '../../stores/reader'
-import { useAppStore } from '../../stores/app'
-import { cacheBookSSE } from '../../api/cache'
-import { getBookshelfWithCacheInfo, deleteBookCache } from '../../api/bookshelf'
-import { countBrowserBookCache, deleteBrowserBookCache } from '../../utils/browserCache'
-import { cacheBookToBrowser, resolveBookChapters } from '../../utils/bookCache'
 import { isLocalBook } from '../../utils/localBook'
+import { useCacheTask, isComicBookByContent } from '../../composables/useCacheTask'
 
 const store = useReaderStore()
-const appStore = useAppStore()
 const theme = computed(() => store.currentTheme)
-
-const working = ref(false)
-const progress = ref(0)
-const currentStatus = ref('准备中...')
-const currentChapterName = ref('')
-const serverCachedCount = ref(0)
-const browserCachedCount = ref(0)
 const isLocalBookInServer = computed(() => isLocalBook(store.book))
-let sse: EventSource | null = null
-let browserSignal = { cancelled: false }
+// 依据当前章节正文预判是否漫画书（含多图、少文字），决定是否显示 EPUB 导出入口
+const isComic = computed(() => isComicBookByContent(store.displayContent) && !isLocalBookInServer.value)
 
+// 缓存任务状态提升到全局单例：关闭面板仅卸载本组件，后台缓存继续运行；
+// 重新打开面板时读到的仍是同一份进度，可继续查看并点「停止」中断。
+const {
+  working,
+  progress,
+  currentStatus,
+  currentChapterName,
+  serverCachedCount,
+  browserCachedCount,
+  refreshStats,
+  startServerCaching,
+  startBrowserCaching,
+  stopWorking,
+  clearServerCache,
+  clearBrowserCache,
+  exportWholeBook,
+  exportComicEpub,
+} = useCacheTask()
+
+// 不再在 onUnmounted 停止缓存——这是「收回面板但缓存继续」的关键。
+// 只在打开面板时刷新一次统计数字。
 onMounted(() => {
   refreshStats()
 })
-
-onUnmounted(() => {
-  stopWorking()
-})
-
-async function refreshStats() {
-  if (!store.book) return
-  if (isLocalBookInServer.value) {
-    serverCachedCount.value = 0
-    browserCachedCount.value = 0
-    return
-  }
-  const [serverList, browserCount] = await Promise.all([
-    getBookshelfWithCacheInfo().catch(() => []),
-    countBrowserBookCache(store.book.bookUrl).catch(() => 0),
-  ])
-  const matched = serverList.find((book) => book.bookUrl === store.book?.bookUrl)
-  serverCachedCount.value = matched?.cachedChapterCount || 0
-  browserCachedCount.value = browserCount
-}
-
-function startServerCaching(count: number) {
-  if (!store.book || isLocalBookInServer.value) return
-  stopWorking()
-  working.value = true
-  progress.value = 0
-  currentStatus.value = '连接服务端缓存任务...'
-  currentChapterName.value = ''
-
-  const total = count === 0
-    ? Math.max(0, store.chapters.length - store.currentIndex)
-    : Math.min(count, Math.max(0, store.chapters.length - store.currentIndex))
-
-  sse = cacheBookSSE({
-    bookUrl: store.book.bookUrl,
-    tocUrl: store.currentChapter?.url,
-    count,
-    concurrentCount: 8,
-  })
-
-  sse.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data)
-      const completed = (data.successCount || 0) + (data.cachedCount || 0) - (data.failedCount || 0)
-      if (total > 0) {
-        progress.value = Math.min(100, Math.round((Math.max(0, completed) / total) * 100))
-      }
-      currentStatus.value = `服务端缓存中 (${data.cachedCount || 0} 已缓存 / ${data.successCount || 0} 新增)`
-    } catch {
-      currentStatus.value = '服务端缓存处理中...'
-    }
-  }
-
-  sse.addEventListener('end', async (event) => {
-    try {
-      const data = JSON.parse((event as MessageEvent).data)
-      currentStatus.value = `服务端缓存完成，累计 ${data.cachedCount || 0} 章`
-      progress.value = 100
-    } finally {
-      closeSSE()
-      await refreshStats()
-      window.setTimeout(() => {
-        working.value = false
-      }, 800)
-    }
-  })
-
-  sse.onerror = async () => {
-    currentStatus.value = '服务端缓存已中断'
-    closeSSE()
-    await refreshStats()
-    window.setTimeout(() => {
-      working.value = false
-    }, 1200)
-  }
-}
-
-async function startBrowserCaching(count: number) {
-  if (!store.book || isLocalBookInServer.value) return
-  stopWorking()
-  browserSignal = { cancelled: false }
-  working.value = true
-  progress.value = 0
-  currentStatus.value = '准备浏览器缓存...'
-  currentChapterName.value = ''
-
-  try {
-    const chapters = store.chapters.length ? store.chapters : await resolveBookChapters(store.book)
-    const total = count === 0
-      ? Math.max(0, chapters.length - store.currentIndex)
-      : Math.min(count, Math.max(0, chapters.length - store.currentIndex))
-    await cacheBookToBrowser({
-      book: store.book,
-      chapters,
-      startIndex: store.currentIndex,
-      count: count || undefined,
-      signal: browserSignal,
-      onProgress: ({ completed, total, chapterTitle }) => {
-        currentChapterName.value = chapterTitle
-        currentStatus.value = `浏览器缓存中 (${completed}/${total})`
-        progress.value = total > 0 ? Math.round((completed / total) * 100) : 100
-      },
-    })
-    if (!browserSignal.cancelled) {
-      currentStatus.value = `浏览器缓存完成，共 ${total} 章`
-      progress.value = 100
-      appStore.showToast('已缓存到浏览器', 'success')
-    }
-  } catch (error) {
-    currentStatus.value = '浏览器缓存失败'
-    appStore.showToast((error as Error).message || '浏览器缓存失败', 'error')
-  } finally {
-    await refreshStats()
-    window.setTimeout(() => {
-      working.value = false
-    }, 800)
-  }
-}
-
-async function clearServerCache() {
-  if (!store.book || isLocalBookInServer.value) return
-  await deleteBookCache(store.book.bookUrl)
-  appStore.showToast('服务端缓存已清除', 'success')
-  await refreshStats()
-}
-
-async function clearBrowserCache() {
-  if (!store.book || isLocalBookInServer.value) return
-  await deleteBrowserBookCache(store.book.bookUrl)
-  appStore.showToast('浏览器缓存已清除', 'success')
-  await refreshStats()
-}
-
-function closeSSE() {
-  if (sse) {
-    sse.close()
-    sse = null
-  }
-}
-
-function stopWorking() {
-  browserSignal.cancelled = true
-  closeSSE()
-  working.value = false
-}
 </script>
 
 <style scoped>
@@ -370,7 +270,22 @@ function stopWorking() {
   border-left: 4px solid var(--color-primary, #f43f5e);
 }
 
+.info-stack { display: flex; flex-direction: column; gap: 12px; }
+
 .info-card p { margin: 0; font-size: 13px; line-height: 1.6; opacity: 0.8; }
+.info-card p + p { margin-top: 8px; }
+.info-card .info-card-title { font-weight: 600; font-size: 14px; opacity: 1; }
+.info-card b { opacity: 1; font-weight: 600; }
+
+.naming-sample {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: 0.9;
+}
 
 .option-list { display: flex; flex-direction: column; gap: 12px; }
 
@@ -406,6 +321,7 @@ function stopWorking() {
 
 .cache-opt .label { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
 .cache-opt .sub { font-size: 11px; opacity: 0.6; }
+
 
 .caching-status {
   min-height: 360px;
