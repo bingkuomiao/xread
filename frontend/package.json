@@ -1,7 +1,7 @@
 {
   "name": "xread-frontend",
   "private": true,
-  "version": "1.0.48.69",
+  "version": "1.0.48.199",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,6 +12,7 @@
   "dependencies": {
     "artplayer": "^5.4.0",
     "axios": "^1.8.2",
+    "fflate": "^0.8.3",
     "hls.js": "^1.7.3",
     "opencc-js": "^1.0.5",
     "pinia": "^3.0.4",
