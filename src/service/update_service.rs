@@ -127,7 +127,7 @@ impl UpdateService {
             .header(ACCEPT, "application/vnd.github+json")
             .header(
                 USER_AGENT,
-                format!("reader-rust/{}", env!("CARGO_PKG_VERSION")),
+                format!("reader-rust/{}", crate::version::APP_VERSION),
             )
             .send()
             .await

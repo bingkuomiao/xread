@@ -823,7 +823,50 @@ impl BookService {
         Ok((all_chapters, visited_page_urls.into_iter().collect()))
     }
 
+    /// 联网抓取正文并回写服务端缓存（保留旧签名，供后台缓存任务与测试直接调用）。
+    /// 正常阅读请改用 `get_content_with_cache`，它在非强制刷新时优先命中服务端缓存。
     pub async fn get_content(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        source: &BookSource,
+        chapter_url: &str,
+    ) -> Result<String, AppError> {
+        self.get_content_inner(user_ns, book_url, source, chapter_url)
+            .await
+    }
+
+    /// 阅读链路统一入口：非强制刷新时优先读取服务端缓存（命中即秒开），
+    /// 未命中或强制刷新时才联网抓取；联网成功后总会回写缓存。
+    ///
+    /// - `force_refresh = false`（正常打开/翻章）：命中已缓存章节直接返回，避免每次联网等待；
+    /// - `force_refresh = true`（手动刷新/换源）：跳过缓存联网取最新正文，调用方会先删缓存。
+    pub async fn get_content_with_cache(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        source: &BookSource,
+        chapter_url: &str,
+        force_refresh: bool,
+    ) -> Result<String, AppError> {
+        let book_key = md5_hex(book_url);
+        if !force_refresh {
+            if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, chapter_url).await {
+                if !cached.is_empty() {
+                    tracing::debug!(
+                        "get_content_with_cache server cache hit for {}, len={}",
+                        chapter_url,
+                        cached.len()
+                    );
+                    return Ok(cached);
+                }
+            }
+        }
+        self.get_content_inner(user_ns, book_url, source, chapter_url)
+            .await
+    }
+
+    async fn get_content_inner(
         &self,
         user_ns: &str,
         book_url: &str,
@@ -836,18 +879,15 @@ impl BookService {
             chapter_url,
             book_key
         );
-        // 彻底关闭服务端文件缓存：不读取本地缓存，直接向源站请求最新内容
-        /*
-        if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, chapter_url).await {
-            tracing::debug!("get_content returning cached content, len={}", cached.len());
-            return Ok(cached);
-        }
-        */
-        tracing::debug!("get_content cache miss, fetching from network");
 
+        // 联网优先取最新正文；仅当联网失败或解析结果为空时，回退读取服务端已缓存章节。
+        // 这样正文始终保持最新，同时在书源失效 / 断网 / 站点反爬时，之前「缓存到服务端」
+        // 的章节仍可正常阅读，而不是白屏。强制刷新（refresh=1）由调用方先删缓存，
+        // 因此这里读到的缓存只会是「非强制刷新」场景下的旧内容，不影响刷新语义。
         let mut all_content = String::new();
         let mut visited_urls = std::collections::HashSet::new();
         let mut current_url = chapter_url.to_string();
+        let mut fetch_error: Option<AppError> = None;
 
         // Follow pagination to get all content pages
         loop {
@@ -858,9 +898,22 @@ impl BookService {
             visited_urls.insert(current_url.clone());
 
             tracing::debug!("get_content fetching: {}", current_url);
-            let res = self
+            let res = match self
                 .fetch_source_url(user_ns, source, &current_url, &source.book_source_url)
-                .await?;
+                .await
+            {
+                Ok(res) => res,
+                Err(err) => {
+                    // 记下错误，稍后统一尝试缓存兜底；不再在此处直接返回。
+                    tracing::warn!(
+                        "get_content fetch failed for {}: {:?}; will try server cache fallback",
+                        current_url,
+                        err
+                    );
+                    fetch_error = Some(err);
+                    break;
+                }
+            };
             tracing::debug!("get_content fetch done, body len={}", res.body.len());
             let content = self.parser.content(source, &res.body, &res.url);
             tracing::debug!("get_content parsed content len={}", content.len());
@@ -887,12 +940,30 @@ impl BookService {
             }
         }
 
-        tracing::debug!("get_content final content len={}", all_content.len());
+        tracing::debug!("get_content final network content len={}", all_content.len());
         if !all_content.is_empty() {
             let _ = self
                 .cache
                 .put(user_ns, &book_key, chapter_url, &all_content)
                 .await;
+            return Ok(all_content);
+        }
+
+        // 联网拿不到有效正文（请求失败或解析为空）：回退读取服务端缓存，避免白屏。
+        if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, chapter_url).await {
+            if !cached.is_empty() {
+                tracing::info!(
+                    "get_content falling back to server cache for {}, len={}",
+                    chapter_url,
+                    cached.len()
+                );
+                return Ok(cached);
+            }
+        }
+
+        // 没有可用缓存：若联网有明确错误则原样抛出，否则返回空正文（保持旧行为）。
+        if let Some(err) = fetch_error {
+            return Err(err);
         }
         Ok(all_content)
     }
@@ -1111,16 +1182,13 @@ impl BookService {
         &self,
         user_ns: &str,
         book_url: &str,
-        chapter_urls: &[String],
+        _chapter_urls: &[String],
     ) -> Result<usize, AppError> {
+        // 一次目录扫描统计该书的正文缓存文件数，替代逐章 exists() 的 O(N) 同步 stat。
+        // 书/缓存章节越多，提速越明显（机械盘/NAS/WSL2 上从秒级降到毫秒级）。
+        // 口径：磁盘上实际缓存的章节数（含换源残留的孤儿缓存），展示用途无副作用。
         let book_key = md5_hex(book_url);
-        let mut count = 0usize;
-        for url in chapter_urls {
-            if self.cache.exists(user_ns, &book_key, url).await {
-                count += 1;
-            }
-        }
-        Ok(count)
+        Ok(self.cache.count_chapters(user_ns, &book_key).await)
     }
 
     pub async fn cache_chapter(
@@ -1154,7 +1222,9 @@ impl BookService {
             let data = fs::read(&path)
                 .await
                 .map_err(|e| AppError::Internal(e.into()))?;
-            let content_type = content_type_from_ext(&ext);
+            // 按真实字节识别 content-type：URL 无扩展名的封面（如 QQ qbnovel.qq.com/static/<hex>）
+            // 缓存文件被命名为 .png，但实际可能是 AVIF/JPEG，若仍回 image/png 浏览器会解析失败。
+            let content_type = content_type_from_bytes(&data).unwrap_or_else(|| content_type_from_ext(&ext));
             return Ok((data, content_type));
         }
         if let Some(parent) = path.parent() {
@@ -1212,8 +1282,42 @@ impl BookService {
             .await
             .map_err(|e| AppError::Internal(e.into()))?
             .to_vec();
+        // 以真实字节为准：部分站点 Content-Type 与内容不符（如 QQ 返回 avif 字节、
+        // 无扩展名 URL 兜底成 png），按魔数识别可保证前端 <img> 正确渲染。
+        let content_type = content_type_from_bytes(&bytes).unwrap_or(content_type);
         let _ = fs::write(&path, &bytes).await;
         Ok((bytes, content_type))
+    }
+
+    /// 删除某个封面 URL 对应的本地缓存文件（public 命名空间）。
+    /// 封面文件名由 md5(url) 加 URL 推断的扩展名组成；这里按 md5 前缀扫描删除，
+    /// 兼容无扩展名 URL 兜底成其他扩展名的历史缓存。
+    pub async fn delete_cover_cache(&self, url: &str) -> Result<bool, AppError> {
+        if url.trim().is_empty() {
+            return Ok(false);
+        }
+        let name = md5_hex(url);
+        let prefix = format!("{}.", name);
+        let dir = self
+            .storage_dir
+            .join("cache")
+            .join("public")
+            .join("cover");
+        let mut deleted = false;
+        if let Ok(mut entries) = fs::read_dir(&dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                let matched = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n == name || n.starts_with(&prefix))
+                    .unwrap_or(false);
+                if matched && fs::remove_file(&path).await.is_ok() {
+                    deleted = true;
+                }
+            }
+        }
+        Ok(deleted)
     }
 
     pub async fn load_book_sources_cache(
@@ -1835,6 +1939,50 @@ fn content_type_from_ext(ext: &str) -> String {
     .to_string()
 }
 
+/// 按文件头魔数识别图片真实 MIME，纠正「扩展名/响应头与实际字节不符」的情况。
+/// 覆盖 AVIF/HEIF（ftyp 品牌）、PNG、JPEG、GIF、WEBP、BMP、SVG。
+/// AVIF 与 HEIC 同为 ISOBMFF，但 MIME 不同：AVIF=image/avif，HEIC=image/heic，
+/// 必须按品牌区分，否则浏览器可能拒绝渲染。品牌列表需与 avif_dimensions 保持一致。
+fn content_type_from_bytes(data: &[u8]) -> Option<String> {
+    // AVIF / HEIF: ISOBMFF，4 字节 size 后是 'ftyp'。按品牌细分 MIME。
+    if data.len() >= 12 && &data[4..8] == b"ftyp" {
+        let end = data.len().min(64);
+        let brands = &data[8..end];
+        let has = |tag: &[u8; 4]| brands.windows(4).any(|w| w == tag);
+        // AVIF 家族
+        if has(b"avif") || has(b"avis") {
+            return Some("image/avif".to_string());
+        }
+        // HEIC/HEIF 家族（含通用 mif1/msf1）
+        if has(b"heic") || has(b"heix") || has(b"hevx") || has(b"heim") || has(b"heis")
+            || has(b"hevm") || has(b"hevs") || has(b"mif1") || has(b"msf1")
+        {
+            return Some("image/heic".to_string());
+        }
+    }
+    if data.len() >= 8 && data[..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
+        return Some("image/png".to_string());
+    }
+    if data.len() >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff {
+        return Some("image/jpeg".to_string());
+    }
+    if data.len() >= 6 && (&data[..6] == b"GIF87a" || &data[..6] == b"GIF89a") {
+        return Some("image/gif".to_string());
+    }
+    if data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        return Some("image/webp".to_string());
+    }
+    if data.len() >= 2 && data[0] == b'B' && data[1] == b'M' {
+        return Some("image/bmp".to_string());
+    }
+    // SVG: 忽略开头空白/XML 声明后含 <svg
+    let head = &data[..data.len().min(256)];
+    if head.windows(4).any(|w| w == b"<svg") {
+        return Some("image/svg+xml".to_string());
+    }
+    None
+}
+
 /// 判空某书源的 loginUrl 是否为「JS 登录脚本」（而非真实登录页 URL）。
 /// 光遇聚合等重度书源的 loginUrl 是纯 JS（`//登陆\nfunction login(flag){...}`，
 /// 内部也可能包含 https:// 等代码），需要走 JS 登录路径；而普通书源的 loginUrl
@@ -1908,5 +2056,99 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(&storage_dir).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_content_with_cache_returns_cached_content_without_network() {
+        // 预置一份服务端缓存后，非强制刷新必须直接命中缓存返回，不发起任何联网请求。
+        // 用不可解析的源地址确保：一旦走联网就必然失败，从而证明命中路径是纯缓存读取。
+        let storage_dir =
+            std::env::temp_dir().join(format!("reader-rust-cache-hit-{}", std::process::id()));
+        let service = BookService::new(
+            HttpClient::new(1, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+
+        let user_ns = "cache-test";
+        let book_url = "http://127.0.0.1:1/book/1";
+        let chapter_url = "http://127.0.0.1:1/book/1/ch/1";
+        let cached_text = "第一章 缓存正文内容（无需联网）";
+        let source = BookSource::default();
+
+        let book_key = md5_hex(book_url);
+        service
+            .cache
+            .put(user_ns, &book_key, chapter_url, cached_text)
+            .await
+            .unwrap();
+
+        let hit = service
+            .get_content_with_cache(user_ns, book_url, &source, chapter_url, false)
+            .await
+            .unwrap();
+        assert_eq!(hit, cached_text);
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+    }
+
+    #[tokio::test]
+    async fn delete_cover_cache_removes_only_matching_md5_files() {
+        let storage_dir =
+            std::env::temp_dir().join(format!("reader-rust-del-cover-{}", std::process::id()));
+        let service = BookService::new(
+            HttpClient::new(1, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+
+        let cover_dir = storage_dir.join("cache").join("public").join("cover");
+        tokio::fs::create_dir_all(&cover_dir).await.unwrap();
+        let target_url = "https://example.com/cover/target.jpg";
+        let target_name = md5_hex(target_url);
+        let target_path = cover_dir.join(format!("{}.jpg", target_name));
+        // 兼容历史兜底扩展名：同 md5 不同扩展名也要一起删
+        let target_alt_path = cover_dir.join(format!("{}.png", target_name));
+        let other_path = cover_dir.join(format!("{}.jpg", md5_hex("https://example.com/other.jpg")));
+        tokio::fs::write(&target_path, b"cover").await.unwrap();
+        tokio::fs::write(&target_alt_path, b"cover").await.unwrap();
+        tokio::fs::write(&other_path, b"cover").await.unwrap();
+
+        let deleted = service.delete_cover_cache(target_url).await.unwrap();
+        assert!(deleted);
+        assert!(!target_path.exists());
+        assert!(!target_alt_path.exists());
+        assert!(other_path.exists(), "无关封面不应被删除");
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+    }
+
+    #[test]
+    fn content_type_from_bytes_distinguishes_avif_and_heic() {
+        // AVIF 家族 → image/avif
+        let mut avif = vec![0u8; 64];
+        avif[4..8].copy_from_slice(b"ftyp");
+        avif[8..12].copy_from_slice(b"avif");
+        assert_eq!(content_type_from_bytes(&avif).as_deref(), Some("image/avif"));
+
+        // HEIC 家族 → image/heic（不能错标成 image/avif）
+        let mut heic = vec![0u8; 64];
+        heic[4..8].copy_from_slice(b"ftyp");
+        heic[8..12].copy_from_slice(b"heic");
+        assert_eq!(content_type_from_bytes(&heic).as_deref(), Some("image/heic"));
+
+        // 通用 mif1 品牌 → image/heic（按 HEIC 兼容处理）
+        let mut mif1 = vec![0u8; 64];
+        mif1[4..8].copy_from_slice(b"ftyp");
+        mif1[8..12].copy_from_slice(b"mif1");
+        assert_eq!(content_type_from_bytes(&mif1).as_deref(), Some("image/heic"));
+
+        // 常见传统格式不受影响
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        assert_eq!(content_type_from_bytes(&png).as_deref(), Some("image/png"));
+        let jpeg = [0xff, 0xd8, 0xff, 0xe0];
+        assert_eq!(content_type_from_bytes(&jpeg).as_deref(), Some("image/jpeg"));
     }
 }

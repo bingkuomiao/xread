@@ -57,7 +57,7 @@ pub async fn run() -> anyhow::Result<()> {
     let update_service = Arc::new(UpdateService::new(
         json_document_service.clone(),
         cfg.request_timeout_secs,
-        format!("v{}", env!("CARGO_PKG_VERSION")),
+        format!("v{}", crate::version::APP_VERSION),
     )?);
 
     let state = AppState {

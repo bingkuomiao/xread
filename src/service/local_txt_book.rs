@@ -40,9 +40,18 @@ struct StoredTxtIndex {
     book_url: String,
     name: String,
     file_name: String,
+    /// 正文实际存储文件名（规范为「书名.txt」）
+    #[serde(default)]
+    stored_file_name: Option<String>,
     byte_len: usize,
     char_len: usize,
     chapters: Vec<StoredTxtChapter>,
+    /// 从正文开头解析出的作者（可选，旧书缺省为空）
+    #[serde(default)]
+    author: Option<String>,
+    /// 从正文开头解析出的简介（可选，旧书缺省为空）
+    #[serde(default)]
+    intro: Option<String>,
 }
 
 pub fn is_local_txt_origin(value: &str) -> bool {
@@ -156,17 +165,6 @@ pub fn sanitize_txt_file_name(file_name: &str) -> String {
     }
 }
 
-pub fn book_name_from_file_name(file_name: &str) -> String {
-    let safe = sanitize_txt_file_name(file_name);
-    Path::new(&safe)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("本地小说")
-        .to_string()
-}
-
 pub fn validate_txt_upload(file_name: &str, byte_len: usize) -> Result<(), AppError> {
     let safe = sanitize_txt_file_name(file_name);
     if !safe.to_lowercase().ends_with(".txt") {
@@ -198,6 +196,10 @@ impl LocalTxtBookService {
         user_ns: &str,
         file_name: &str,
         bytes: &[u8],
+        name: &str,
+        author: &str,
+        intro: &str,
+        stored_file_name: &str,
     ) -> Result<Book, AppError> {
         validate_txt_upload(file_name, bytes.len())?;
         let safe_file_name = sanitize_txt_file_name(file_name);
@@ -213,20 +215,49 @@ impl LocalTxtBookService {
             md5_hex(&text)
         ));
         let book_url = format!("{}:{}", LOCAL_TXT_ORIGIN, hash);
+
+        // 书名/作者/简介全部由前端解析并作为字段传入，后端按值使用，不再解析文件名规范。
+        // 仅在前端未传（旧客户端 / 空值）时给兜底，避免空书名。
+        let resolved_name = {
+            let n = name.trim();
+            if n.is_empty() { "本地小说".to_string() } else { n.to_string() }
+        };
+        let resolved_author = {
+            let a = author.trim();
+            if a.is_empty() { "本地导入".to_string() } else { a.to_string() }
+        };
+        let resolved_intro = intro.trim().to_string();
+
+        // 正文保持原样，不改写：用户可自行整理。章节按原文解析，偏移天然一致。
         let chapters = parse_txt_chapters(&book_url, &text);
+        // 规范存储文件名由前端生成并传入；后端按值使用，不再自行解析/拼接文件名。
+        // 兼容尚未传该字段的旧客户端：回退为《书名》.txt，仍保持规范形态。
+        // 安全：该值来自客户端 multipart 字段，必须经 sanitize_txt_file_name 取纯文件名
+        // （剥离路径分隔符与 ..），防止「../../xxx」之类的路径穿越写到 book_dir 之外；
+        // 兜底分支同样处理，避免 book.name 含分隔符时拼接出越界路径。
+        let stored_file_name = {
+            let s = stored_file_name.trim();
+            if s.is_empty() {
+                sanitize_txt_file_name(&format!("《{}》.txt", resolved_name))
+            } else {
+                sanitize_txt_file_name(s)
+            }
+        };
+
         let book_dir = self.book_dir(user_ns, &book_url)?;
         fs::create_dir_all(&book_dir)
             .await
             .map_err(|e| AppError::Internal(e.into()))?;
-        fs::write(book_dir.join("book.txt"), text.as_bytes())
+        fs::write(book_dir.join(&stored_file_name), text.as_bytes())
             .await
             .map_err(|e| AppError::Internal(e.into()))?;
 
         let index = StoredTxtIndex {
             book_url: book_url.clone(),
-            name: book_name_from_file_name(&safe_file_name),
+            name: resolved_name.clone(),
             file_name: safe_file_name,
-            byte_len: bytes.len(),
+            stored_file_name: Some(stored_file_name),
+            byte_len: text.len(),
             char_len: text.chars().count(),
             chapters: chapters
                 .iter()
@@ -238,6 +269,8 @@ impl LocalTxtBookService {
                     end: chapter.end,
                 })
                 .collect(),
+            author: Some(resolved_author.clone()),
+            intro: if resolved_intro.is_empty() { None } else { Some(resolved_intro.clone()) },
         };
         let data =
             serde_json::to_string_pretty(&index).map_err(|e| AppError::Internal(e.into()))?;
@@ -247,7 +280,8 @@ impl LocalTxtBookService {
 
         Ok(Book {
             name: index.name,
-            author: "本地导入".to_string(),
+            author: index.author.clone().filter(|v| !v.is_empty()).unwrap_or_else(|| "本地导入".to_string()),
+            intro: index.intro.clone().filter(|v| !v.is_empty()),
             book_url: book_url.clone(),
             origin: LOCAL_TXT_ORIGIN.to_string(),
             origin_name: Some(LOCAL_TXT_ORIGIN_NAME.to_string()),
@@ -267,7 +301,8 @@ impl LocalTxtBookService {
         let index = self.read_index(user_ns, book_url).await?;
         Ok(Book {
             name: index.name,
-            author: "本地导入".to_string(),
+            author: index.author.clone().filter(|v| !v.is_empty()).unwrap_or_else(|| "本地导入".to_string()),
+            intro: index.intro.clone().filter(|v| !v.is_empty()),
             book_url: index.book_url.clone(),
             origin: LOCAL_TXT_ORIGIN.to_string(),
             origin_name: Some(LOCAL_TXT_ORIGIN_NAME.to_string()),
@@ -299,6 +334,22 @@ impl LocalTxtBookService {
             .collect())
     }
 
+    /// 读取本地书上传的原始文件全文（原样返回，不按章节切片、不改写）。
+    /// 用于「导出到本地」：导出的内容与用户当初导入的文件完全一致。
+    pub async fn get_full_text(&self, user_ns: &str, book_url: &str) -> Result<(String, String), AppError> {
+        let index = self.read_index(user_ns, book_url).await?;
+        let book_dir = self.book_dir(user_ns, book_url)?;
+        let stored_name = index
+            .stored_file_name
+            .clone()
+            .unwrap_or_else(|| "book.txt".to_string());
+        let path = book_dir.join(&stored_name);
+        let text = fs::read_to_string(&path)
+            .await
+            .map_err(map_local_txt_read_error)?;
+        Ok((text, stored_name))
+    }
+
     pub async fn get_content(&self, user_ns: &str, chapter_url: &str) -> Result<String, AppError> {
         let (book_url, requested_index) = parse_chapter_url(chapter_url)?;
         let index = self.read_index(user_ns, &book_url).await?;
@@ -307,7 +358,14 @@ impl LocalTxtBookService {
             .iter()
             .find(|chapter| chapter.index == requested_index)
             .ok_or_else(|| AppError::BadRequest("章节不存在".to_string()))?;
-        let text = fs::read_to_string(self.book_dir(user_ns, &book_url)?.join("book.txt"))
+        // 正文按索引记录的实际文件名读取（新书为规范「书名.txt」）。
+        let book_dir = self.book_dir(user_ns, &book_url)?;
+        let stored_name = index
+            .stored_file_name
+            .clone()
+            .unwrap_or_else(|| "book.txt".to_string());
+        let path = book_dir.join(&stored_name);
+        let text = fs::read_to_string(path)
             .await
             .map_err(map_local_txt_read_error)?;
         if chapter.start > chapter.end || chapter.end > text.len() {

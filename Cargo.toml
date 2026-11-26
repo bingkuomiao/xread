@@ -1,6 +1,6 @@
 [package]
 name = "xread"
-version = "1.0.48"
+version = "1.0.48+7"
 edition = "2021"
 
 [dependencies]

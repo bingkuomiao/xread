@@ -65,6 +65,30 @@ impl FileCache {
         path.exists()
     }
 
+    /// Count cached chapter files for a book by scanning its directory once.
+    ///
+    /// Much faster than calling `exists()` per chapter: O(1) directory scan instead of
+    /// O(N) stat syscalls. Chapter cache files are all `<md5>.txt`, so we filter by
+    /// the `.txt` extension and skip subdirectories/temp files.
+    pub async fn count_chapters(&self, user_ns: &str, book_key: &str) -> usize {
+        let dir = self.book_path(user_ns, book_key);
+        let mut entries = match fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(_) => return 0,
+        };
+        let mut count = 0usize;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.path().extension().and_then(|e| e.to_str()) != Some("txt") {
+                continue;
+            }
+            match entry.file_type().await {
+                Ok(ft) if ft.is_file() => count += 1,
+                _ => {}
+            }
+        }
+        count
+    }
+
     /// Remove all cache for a book (delete the book's cache directory)
     pub async fn remove_book(&self, user_ns: &str, book_key: &str) -> anyhow::Result<bool> {
         let path = self.book_path(user_ns, book_key);

@@ -7,6 +7,7 @@ mod parser;
 mod service;
 mod storage;
 mod util;
+mod version;
 
 use app::bootstrap::run;
 

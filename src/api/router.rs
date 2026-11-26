@@ -119,6 +119,7 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::remove_book_group_multi),
         )
         .route("/reader3/uploadTxtBook", post(handlers::upload_txt_book))
+        .route("/reader3/exportLocalBook", post(handlers::export_local_book))
         .route("/reader3/uploadEpubBook", post(handlers::upload_epub_book))
         .route("/reader3/saveBook", post(handlers::save_book))
         .route("/reader3/saveBooks", post(handlers::save_books))

@@ -101,6 +101,12 @@ pub struct BookContentRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ExportLocalBookRequest {
+    #[serde(rename = "bookUrl", alias = "url")]
+    book_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DeleteCacheRequest {
     #[serde(rename = "chapterUrl")]
     chapter_url: Option<String>,
@@ -948,11 +954,50 @@ pub async fn get_book_content(
             .await;
     }
 
+    // 阅读链路统一走缓存优先入口：正常阅读命中服务端缓存即秒开，
+    // 手动刷新/换源（refresh=1）时跳过缓存联网取最新正文。
     let content = state
         .book_service
-        .get_content(&user_ns, &book_url, &source, &chapter_url)
+        .get_content_with_cache(&user_ns, &book_url, &source, &chapter_url, do_refresh)
         .await?;
     Ok(Json(ApiResponse::ok(serde_json::Value::String(content))))
+}
+
+/// 导出本地书原始文件全文（原样返回，不切片、不改写）。
+/// 本地书导出走此接口，避免逐章拼接引入章节标题/元信息，保证与导入文件一致。
+pub async fn export_local_book(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<ExportLocalBookRequest>,
+    body: axum::body::Bytes,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let user_ns = state
+        .user_service
+        .resolve_read_user_ns(auth.access_token(), auth.secure_key(), auth.user_ns())
+        .await
+        .map_err(|_| AppError::BadRequest("NEED_LOGIN".to_string()))?;
+
+    let mut req = q;
+    if !body.is_empty() {
+        if let Ok(v) = serde_json::from_slice::<ExportLocalBookRequest>(&body) {
+            if req.book_url.is_none() {
+                req.book_url = v.book_url;
+            }
+        }
+    }
+    let book_url = req
+        .book_url
+        .filter(|u| is_local_txt_url(u))
+        .ok_or_else(|| AppError::BadRequest("不是本地 TXT 书籍".to_string()))?;
+
+    let (text, stored_name) = state
+        .local_txt_book_service
+        .get_full_text(&user_ns, &book_url)
+        .await?;
+    Ok(Json(ApiResponse::ok(serde_json::json!({
+        "text": text,
+        "storedName": stored_name,
+    }))))
 }
 
 pub async fn delete_book_cache(
@@ -1107,27 +1152,53 @@ pub async fn upload_txt_book(
 
     let mut file_name = String::new();
     let mut bytes: Option<Vec<u8>> = None;
+    // 书名/作者/简介/存储文件名均由前端解析生成后上传；后端按值使用，零解析。
+    let mut name = String::new();
+    let mut author = String::new();
+    let mut intro = String::new();
+    let mut stored_file_name = String::new();
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?
     {
         let field_name = field.name().unwrap_or_default().to_string();
-        if field_name != "file" {
-            continue;
+        match field_name.as_str() {
+            "file" => {
+                file_name = field.file_name().unwrap_or("book.txt").to_string();
+                bytes = Some(
+                    read_limited_multipart_field(field, MAX_TXT_UPLOAD_BYTES, "TXT 文件不能超过 50MB")
+                        .await?,
+                );
+            }
+            "name" => {
+                name = field.text().await.unwrap_or_default();
+            }
+            "author" => {
+                author = field.text().await.unwrap_or_default();
+            }
+            "intro" => {
+                intro = field.text().await.unwrap_or_default();
+            }
+            "storedFileName" => {
+                stored_file_name = field.text().await.unwrap_or_default();
+            }
+            _ => {}
         }
-        file_name = field.file_name().unwrap_or("book.txt").to_string();
-        bytes = Some(
-            read_limited_multipart_field(field, MAX_TXT_UPLOAD_BYTES, "TXT 文件不能超过 50MB")
-                .await?,
-        );
-        break;
     }
 
     let bytes = bytes.ok_or_else(|| AppError::BadRequest("file required".to_string()))?;
     let book = state
         .local_txt_book_service
-        .import_txt_book(&user_ns, &file_name, &bytes)
+        .import_txt_book(
+            &user_ns,
+            &file_name,
+            &bytes,
+            &name,
+            &author,
+            &intro,
+            &stored_file_name,
+        )
         .await?;
     if let Err(err) = ensure_user_local_book_limit(&state, &user_ns, &book.book_url).await {
         if let Err(cleanup_err) = state
@@ -1598,7 +1669,9 @@ pub async fn get_shelf_book_with_cache_info(
         }
 
         if !found_cached_chapters {
-            prefetch_books.push(book.clone());
+            // 记录最近阅读时间用于排序：优先正文阅读时间，回退上次检查时间，都没有则视为最旧。
+            let last_read = book.dur_chapter_time.or(book.last_check_time).unwrap_or(0);
+            prefetch_books.push((last_read, book.clone()));
         }
 
         let mut val = serde_json::to_value(&book).unwrap_or(serde_json::json!({}));
@@ -1612,10 +1685,25 @@ pub async fn get_shelf_book_with_cache_info(
     }
 
     if !prefetch_books.is_empty() {
+        // 启动期目录预取限流：只预取「最近阅读」的少量书，避免书多时启动后长时间联网抓目录占满资源。
+        // 1) 按最近阅读时间降序；2) 只取前 PREFETCH_RECENT_LIMIT 本；3) 延迟 PREFETCH_START_DELAY_MS
+        // 再开始（让首屏渲染/书架响应先完成）；4) 每本之间留间隔，避免瞬间打满书源。
+        const PREFETCH_RECENT_LIMIT: usize = 8;
+        const PREFETCH_START_DELAY_MS: u64 = 15_000;
+        const PREFETCH_GAP_MS: u64 = 800;
+
+        prefetch_books.sort_by(|a, b| b.0.cmp(&a.0));
+        prefetch_books.truncate(PREFETCH_RECENT_LIMIT);
+        let prefetch_count = prefetch_books.len();
+
         let state_clone = state.clone();
         let user_ns_clone = user_ns.clone();
         tokio::spawn(async move {
-            for book in prefetch_books {
+            tokio::time::sleep(std::time::Duration::from_millis(PREFETCH_START_DELAY_MS)).await;
+            for (idx, (_read_at, book)) in prefetch_books.into_iter().enumerate() {
+                if idx > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(PREFETCH_GAP_MS)).await;
+                }
                 if let Ok(Some(source)) = state_clone
                     .book_source_service
                     .get(&user_ns_clone, &book.origin)
@@ -1639,6 +1727,7 @@ pub async fn get_shelf_book_with_cache_info(
                     }
                 }
             }
+            tracing::debug!("startup toc prefetch done: {} books", prefetch_count);
         });
     }
 
@@ -1649,13 +1738,53 @@ pub async fn get_shelf_book_with_cache_info(
 
 pub async fn get_book_cover(
     State(state): State<AppState>,
+    auth: AuthContext,
     Query(q): Query<CoverQuery>,
 ) -> Result<Response, AppError> {
     let url = match q.path {
         Some(u) if !u.trim().is_empty() => u,
         _ => return Ok(StatusCode::NOT_FOUND.into_response()),
     };
-    // Use "public" namespace for unauthenticated cover requests
+
+    // 统一封面入口：本地书（EPUB 内嵌封面）的资源路径也走本接口。
+    // path 形如 /reader3/localEpubAsset?bookUrl=<encoded>&path=<encoded>，
+    // 解析出 bookUrl + 内部路径后带鉴权直接读本地资源；网络书仍走远程下载。
+    if url.starts_with("/reader3/localEpubAsset") {
+        let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let mut book_url = String::new();
+        let mut asset_path = String::new();
+        for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+            match k.as_ref() {
+                "bookUrl" => book_url = v.into_owned(),
+                "path" => asset_path = v.into_owned(),
+                _ => {}
+            }
+        }
+        if book_url.is_empty() || asset_path.is_empty() {
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        }
+        let user_ns = state
+            .user_service
+            .resolve_read_user_ns(auth.access_token(), auth.secure_key(), auth.user_ns())
+            .await
+            .map_err(|_| AppError::BadRequest("NEED_LOGIN".to_string()))?;
+        let asset = state
+            .local_epub_book_service
+            .get_asset(&user_ns, &book_url, &asset_path)
+            .await?;
+        let mut resp = Response::new(Body::from(asset.bytes));
+        let headers = resp.headers_mut();
+        headers.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("private, max-age=3600"),
+        );
+        if let Ok(v) = header::HeaderValue::from_str(&asset.content_type) {
+            headers.insert(header::CONTENT_TYPE, v);
+        }
+        return Ok(resp);
+    }
+
+    // Use "public" namespace for unauthenticated remote cover requests
     match state.book_service.get_cover("public", &url).await {
         Ok((bytes, content_type)) => {
             let mut resp = Response::new(Body::from(bytes));
@@ -2862,8 +2991,28 @@ async fn cleanup_ai_book_memories(state: &AppState, user_ns: &str, books: &[Book
 }
 
 async fn cleanup_local_book_files(state: &AppState, user_ns: &str, books: &[Book]) {
+    // 删除操作会把目标书从书架移除，这里读删除后的书架，统计仍被引用的封面 URL，
+    // 避免多本书共用同一封面时误删。读取失败则跳过封面清理（保守，封面可重新下载）。
+    let retained_cover_urls = match state.book_service.get_bookshelf(user_ns).await {
+        Ok(shelf) => Some(
+            shelf
+                .into_iter()
+                .flat_map(|b| {
+                    [b.cover_url, b.custom_cover_url]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<String>>()
+                })
+                .collect::<std::collections::HashSet<String>>(),
+        ),
+        Err(_) => None,
+    };
+
     for book in books {
-        if is_local_txt_origin(&book.origin) || is_local_txt_url(&book.book_url) {
+        let is_local_txt = is_local_txt_origin(&book.origin) || is_local_txt_url(&book.book_url);
+        let is_local_epub = is_local_epub_origin(&book.origin) || is_local_epub_url(&book.book_url);
+
+        if is_local_txt {
             if let Err(err) = state
                 .local_txt_book_service
                 .delete_book_files(user_ns, &book.book_url)
@@ -2875,7 +3024,7 @@ async fn cleanup_local_book_files(state: &AppState, user_ns: &str, books: &[Book
                     err
                 );
             }
-        } else if is_local_epub_origin(&book.origin) || is_local_epub_url(&book.book_url) {
+        } else if is_local_epub {
             if let Err(err) = state
                 .local_epub_book_service
                 .delete_book_files(user_ns, &book.book_url)
@@ -2888,6 +3037,41 @@ async fn cleanup_local_book_files(state: &AppState, user_ns: &str, books: &[Book
                 );
             }
         }
+
+        if !is_local_txt && !is_local_epub {
+            continue;
+        }
+
+        // 本地书导入补全的封面会下载到 public 命名空间缓存，删书时一并清理。
+        if let Some(retained) = &retained_cover_urls {
+            for url in [book.cover_url.as_ref(), book.custom_cover_url.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                if url.trim().is_empty() || retained.contains(url.as_str()) {
+                    continue;
+                }
+                if let Err(err) = state.book_service.delete_cover_cache(url).await {
+                    tracing::warn!("failed to delete cover cache for {}: {:?}", url, err);
+                }
+            }
+        }
+
+        // 顺带清理正文、目录与书源缓存（本地书一般没有，保险起见）。
+        let _ = state
+            .book_service
+            .delete_book_cache(user_ns, &book.book_url)
+            .await;
+        if let Some(toc_url) = book.toc_url.as_deref() {
+            let _ = state
+                .book_service
+                .delete_chapter_list_cache(user_ns, toc_url)
+                .await;
+        }
+        let _ = state
+            .book_service
+            .delete_book_sources_cache(user_ns, &book.book_url)
+            .await;
     }
 }
 
@@ -3075,6 +3259,7 @@ fn take_available_source_sse_matches(
     }
     matches
 }
+
 
 #[cfg(test)]
 mod tests {
