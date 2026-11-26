@@ -93,16 +93,28 @@
               <path d="M12 5v14M5 12h14" />
             </svg>
           </button>
+
+          <button class="m-letter-btn night-toggle" :class="{ active: store.isNight }" title="夜间模式" aria-label="夜间模式" @click="store.toggleNight()">
+            <svg v-if="!store.isNight" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z" />
+            </svg>
+            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4" />
+            </svg>
+          </button>
         </div>
 
-        <!-- 功能网格：4 × 2 -->
+        <!-- 功能网格：4 × 3 -->
         <div class="m-grid">
-          <button class="m-grid-item" @click="$emit('search')">
+          <button class="m-grid-item" :class="{ active: store.activePanel === 'source' }" @click="store.togglePanel('source')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="11" cy="11" r="7" />
-              <path d="m20 20-3.5-3.5" />
+              <path d="M4 8h13a3 3 0 0 1 0 6" />
+              <path d="m14 5 3 3-3 3" />
+              <path d="M20 16H7a3 3 0 0 1 0-6" />
+              <path d="m10 19-3-3 3-3" />
             </svg>
-            <span>搜索</span>
+            <span>切换</span>
           </button>
 
           <button class="m-grid-item" :class="{ active: store.isAutoScrolling }" @click="store.toggleAutoReading()">
@@ -122,31 +134,22 @@
             <span>替换</span>
           </button>
 
-          <button class="m-grid-item" :class="{ active: store.isNight }" @click="store.toggleNight()">
-            <svg v-if="!store.isNight" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z" />
+          <button class="m-grid-item" :class="{ active: store.activePanel === 'cache' }" @click="store.openPanel('cache', 'settings')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <ellipse cx="12" cy="5" rx="8" ry="3" />
+              <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+              <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
             </svg>
-            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="4" />
-              <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4" />
-            </svg>
-            <span>夜间</span>
+            <span>缓存</span>
           </button>
 
-          <button class="m-grid-item" :class="{ active: store.activePanel === 'catalog' }" @click="store.togglePanel('catalog')">
+          <button class="m-grid-item" :class="{ active: store.activePanel === 'bookshelf' }" @click="store.togglePanel('bookshelf')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 5h16M4 10h16M4 15h16M4 20h9" />
+              <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20" />
+              <path d="M4 5.5V19a2 2 0 0 0 2 2h14" />
+              <path d="M8 7h8M8 11h8M8 15h5" />
             </svg>
-            <span>目录</span>
-          </button>
-
-          <button class="m-grid-item" :class="{ active: isSpeaking }" @click="$emit('tts')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 14v-2a8 8 0 0 1 16 0v2" />
-              <path d="M18 16a2 2 0 0 1-2 2h-1a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h3z" />
-              <path d="M6 16a2 2 0 0 0 2 2h1a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1H6z" />
-            </svg>
-            <span>朗读</span>
+            <span>书架</span>
           </button>
 
           <button class="m-grid-item" :class="{ active: store.activePanel === 'settings' }" @click="store.togglePanel('settings')">
@@ -156,12 +159,53 @@
             <span>界面</span>
           </button>
 
+          <button class="m-grid-item" @click="$emit('removeBook')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+              <path d="M10 11v6M14 11v6" />
+            </svg>
+            <span>移除</span>
+          </button>
+
           <button class="m-grid-item" @click="openSettingsDrawer">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="3" />
               <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
             </svg>
             <span>设置</span>
+          </button>
+
+          <!-- 第三行：目录 / 发现 / 搜索 / 朗读（与上方按钮同一 .m-grid-item 样式，尺寸/间距/字号完全一致） -->
+          <button class="m-grid-item" :class="{ active: store.activePanel === 'catalog' }" @click="store.togglePanel('catalog')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 5h16M4 10h16M4 15h16M4 20h9" />
+            </svg>
+            <span>目录</span>
+          </button>
+
+          <button class="m-grid-item" @click="$emit('goExplore')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3a9 9 0 1 0 9 9" />
+              <path d="m16.24 7.76-2.12 6.36-6.36 2.12 2.12-6.36 6.36-2.12z" />
+            </svg>
+            <span>发现</span>
+          </button>
+
+          <button class="m-grid-item" @click="$emit('search')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.5-3.5" />
+            </svg>
+            <span>搜索</span>
+          </button>
+
+          <button class="m-grid-item" :class="{ active: isSpeaking }" @click="$emit('tts')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 14v-2a8 8 0 0 1 16 0v2" />
+              <path d="M18 16a2 2 0 0 1-2 2h-1a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h3z" />
+              <path d="M6 16a2 2 0 0 0 2 2h1a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1H6z" />
+            </svg>
+            <span>朗读</span>
           </button>
         </div>
       </div>
@@ -192,6 +236,8 @@ const emit = defineEmits<{
   ai: []
   tts: []
   progress: []
+  goExplore: []
+  removeBook: []
 }>()
 
 const store = useReaderStore()
@@ -453,6 +499,12 @@ void emit
   opacity: 1;
   border-color: rgba(128, 128, 128, 0.75);
   background: rgba(128, 128, 128, 0.18);
+}
+
+/* 夜间按钮：与 A 同为圆形边框按钮，左右对称 */
+.m-letter-btn.night-toggle svg {
+  width: 18px;
+  height: 18px;
 }
 
 /* 通用滑轨 */

@@ -358,6 +358,13 @@ function formatDate(ts?: number) {
   gap: 8px;
 }
 
+/* 与其他弹出面板（缓存/切换书籍）的按钮图标尺寸保持一致 */
+.icon-btn svg,
+.close-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
 .icon-btn:disabled {
   opacity: 0.35;
   cursor: default;

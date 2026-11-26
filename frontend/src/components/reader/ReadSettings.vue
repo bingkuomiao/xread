@@ -123,6 +123,15 @@
         </div>
       </div>
 
+      <!-- 页尾页码 -->
+      <div class="setting-row">
+        <label>页尾页码</label>
+        <div class="btn-group">
+          <button class="opt-btn" :class="{ active: config.showPageFooter }" @click="store.updateConfig('showPageFooter', true)">开启</button>
+          <button class="opt-btn" :class="{ active: !config.showPageFooter }" @click="store.updateConfig('showPageFooter', false)">关闭</button>
+        </div>
+      </div>
+
       <div class="settings-sep"></div>
 
       <!-- 翻页方式 -->

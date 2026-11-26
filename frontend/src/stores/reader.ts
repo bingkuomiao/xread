@@ -18,6 +18,7 @@ import {
 import { getReplaceRules } from '../api/replaceRule'
 import type { Book, BookChapter, Bookmark, ReplaceRule } from '../types'
 import { isLocalBook } from '../utils/localBook'
+import { getBrowserCachedChapter, setBrowserCachedChapter } from '../utils/browserCache'
 import { saveRecentReadBook } from '../utils/recentBooks'
 import {
   DEFAULT_OPENAI_BASE_URL,
@@ -57,10 +58,11 @@ export interface ReadConfig {
   chineseMode: 'simplified' | 'traditional'
   specialMode: 'normal' | 'simple'
   enablePreload: boolean
+  showPageFooter: boolean
 }
 
 const defaultConfig: ReadConfig = {
-  fontSize: 18,
+  fontSize: 21,
   fontWeight: 400,
   fontFamily: 'system',
   lineHeight: 1.8,
@@ -78,7 +80,8 @@ const defaultConfig: ReadConfig = {
   selectAction: 'ignore',
   chineseMode: 'simplified',
   specialMode: 'normal',
-  enablePreload: false,
+  enablePreload: true,
+  showPageFooter: false,
 }
 
 function loadConfig(): ReadConfig {
@@ -1281,8 +1284,24 @@ export const useReaderStore = defineStore('reader', () => {
     }
 
     const chapter = chapters.value[index]
-
     const isLocal = isLocalBook(book.value)
+
+    // 秒开：优先读浏览器本地缓存（IndexedDB）。
+    // 网络书与本地书都走这条路径——本地书章节 URL 是确定性的 local-txt:{hash}#{index}，
+    // 缓存 key 稳定；后端每次读本地章节都要 read_index + 整本 read_to_string 再切片，
+    // 大文件重复请求很慢，命中浏览器缓存可瞬时打开（方案A：前端二次缓存）。
+    // 手动刷新 / 换源等 forceRefresh 场景绕过缓存读取，保证取到最新正文。
+    if (!forceRefresh) {
+      try {
+        const cached = await getBrowserCachedChapter(book.value.bookUrl, chapter.url)
+        if (cached) {
+          preloadedContent.value.set(index, cached)
+          return cached
+        }
+      } catch {
+        // IndexedDB 不可用（隐私模式等）时静默退化为服务端读取
+      }
+    }
 
     if (!appStore.isOnline && !isLocal) {
       throw new Error('当前处于离线状态')
@@ -1293,10 +1312,25 @@ export const useReaderStore = defineStore('reader', () => {
       chapterContent = await getBookContent({
         chapterUrl: chapter.url,
         bookSourceUrl: book.value.origin,
-        refresh: 1, // 强制刷新，不使用任何缓存
+        // 默认读取服务端缓存（缓存未命中时后端会自动联网抓取）；
+        // 只有手动刷新/换源等显式场景才强制绕过缓存，避免每次阅读都删掉整本书缓存。
+        // 本地书不受该参数影响（后端按本地文件偏移读取）。
+        refresh: forceRefresh ? 1 : 0,
       })
     } catch (error) {
       throw error
+    }
+
+    // 方案A：读到的正文写回浏览器缓存，下一章/再次打开即可秒开。
+    // 仅本地书走写入——网络书的缓存由显式「缓存到浏览器」流程负责，避免阅读时
+    // 被动占满存储。fire-and-forget，不阻塞阅读；forceRefresh 时用新内容覆盖旧缓存。
+    if (isLocal && chapterContent) {
+      void setBrowserCachedChapter({
+        bookUrl: book.value.bookUrl,
+        chapterUrl: chapter.url,
+        chapterTitle: chapter.title,
+        content: chapterContent,
+      }).catch(() => undefined)
     }
 
     return chapterContent
@@ -1333,7 +1367,8 @@ export const useReaderStore = defineStore('reader', () => {
 
   async function preloadAroundChapter(index: number) {
     if (!book.value || !config.enablePreload) return
-    const targets = [index + 1, index + 2, index - 1]
+    // 向后预加载 5 章、向前 2 章，覆盖当前章节附近的阅读范围
+    const targets = [index + 1, index + 2, index + 3, index + 4, index + 5, index - 1, index - 2]
       .filter((target, pos, list) => target >= 0 && target < chapters.value.length && list.indexOf(target) === pos)
     for (const target of targets) {
       await preloadNextChapter(target)
@@ -1343,8 +1378,8 @@ export const useReaderStore = defineStore('reader', () => {
   async function preloadNextChapter(index: number) {
     if (!book.value || !config.enablePreload || index >= chapters.value.length || preloadedContent.value.has(index)) return
     
-    // Keep max 3 preloaded chapters
-    if (preloadedContent.value.size > 3) {
+    // 最多保留 8 章预加载内容（后5前2 = 7 章，留 1 章余量），超出淘汰最早存入的
+    if (preloadedContent.value.size > 8) {
       const firstKey = preloadedContent.value.keys().next().value
       if (firstKey !== undefined) preloadedContent.value.delete(firstKey)
     }
