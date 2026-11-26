@@ -99,6 +99,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import Artplayer from 'artplayer'
 import Hls from 'hls.js'
+import { buildAuthHeaderValues } from '../../utils/secureAccess'
 
 const props = withDefaults(
   defineProps<{
@@ -230,14 +231,62 @@ function onWindowResize() {
   fitToVideo()
 }
 
-function downloadCurrentVideo() {
+async function downloadCurrentVideo() {
   if (!props.url) return
   const title = (props.title || 'video').trim()
   const safeTitle = title.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80)
   const isM3u8 = /\.m3u8(?:\?|$)/i.test(props.url)
-  const guessedExt = isM3u8 ? 'm3u8' : 'mp4'
+
+  closeAllPanels()
+
+  // m3u8 无法直接下载成可播放文件：交给后端用 ffmpeg 合并转成 mp4 再下载。
+  if (isM3u8) {
+    // 转码期间暂停播放，避免边转边下占用带宽影响成功率和流畅度
+    const wasPlaying = !!(art && art.video && !art.video.paused)
+    if (wasPlaying) art?.pause()
+    if (art) art.notice.show = '正在转换视频，请稍候…'
+    try {
+      const { accessToken, secureKey } = buildAuthHeaderValues(localStorage)
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (accessToken) headers.Authorization = accessToken
+      if (secureKey) headers['X-Secure-Key'] = secureKey
+
+      const response = await fetch('/reader3/convertVideoToMp4', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ url: props.url }),
+      })
+      if (!response.ok) {
+        let msg = `HTTP ${response.status}`
+        try {
+          const data = await response.json()
+          if (data?.errorMsg) msg = data.errorMsg
+        } catch {}
+        throw new Error(msg)
+      }
+      const blob = await response.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = objectUrl
+      a.download = `${safeTitle}.mp4`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      // 延迟释放，确保 WebView 已读完 blob
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
+      if (art) art.notice.show = '已开始下载视频'
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : '未知错误'
+      if (art) art.notice.show = `转换失败：${msg}`
+    } finally {
+      if (wasPlaying) art?.play()
+    }
+    return
+  }
+
+  // 普通直链：保持原有 <a download> 行为
   const match = props.url.match(/\.([a-z0-9]{2,4})(?:\?|#|$)/i)
-  const ext = match ? match[1].toLowerCase() : guessedExt
+  const ext = match ? match[1].toLowerCase() : 'mp4'
   const a = document.createElement('a')
   a.href = props.url
   a.download = `${safeTitle}.${ext}`
@@ -247,7 +296,6 @@ function downloadCurrentVideo() {
   a.click()
   document.body.removeChild(a)
   if (art) art.notice.show = '已开始下载本集视频'
-  closeAllPanels()
 }
 
 /**

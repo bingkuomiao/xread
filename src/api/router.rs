@@ -290,6 +290,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/reader3/uploadFile", post(handlers::upload_file))
         .route("/reader3/deleteFile", post(handlers::delete_file))
         .route("/reader3/getTxtTocRules", get(handlers::get_txt_toc_rules))
+        .route(
+            "/reader3/convertVideoToMp4",
+            post(handlers::convert_video_to_mp4),
+        )
+        .route(
+            "/reader3/videoDownloadStatus",
+            get(handlers::video_download_status),
+        )
         .with_state(state.clone());
 
     let web_root = state.config.web_root.clone();
