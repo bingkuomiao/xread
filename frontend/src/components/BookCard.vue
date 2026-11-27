@@ -125,6 +125,8 @@
 import { computed, ref, watch } from 'vue'
 import { getCoverUrl } from '../api/bookshelf'
 import { isLocalBook } from '../utils/localBook'
+import { canShowAiEntry } from '../utils/aiEntryVisibility'
+import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
 import type { Book, SearchBook } from '../types'
 
@@ -147,6 +149,7 @@ const emit = defineEmits<{
 }>()
 
 const shelfStore = useBookshelfStore()
+const appStore = useAppStore()
 
 const groupName = computed(() => {
   if (props.isSearch) return ''
@@ -231,11 +234,18 @@ const sourceGroup = computed(() => {
   if (!props.isSearch) return ''
   return asSearchBook.value.originGroup || ''
 })
-const showAiEntry = computed(() => {
-  if (props.isSearch || props.editMode) return false
-  const currentBook = props.book as Book
-  return currentBook.recentKind !== 'rss'
-})
+// AI 入口仅对获得「AI模型」授权的账号显示；无密码模式所有人可用。
+// 规则抽为纯函数 aiEntryVisibility，详见其注释与单测。
+const showAiEntry = computed(() =>
+  canShowAiEntry({
+    isSearch: !!props.isSearch,
+    editMode: !!props.editMode,
+    recentKind: (props.book as Book).recentKind,
+    authReady: appStore.userInfoLoaded,
+    isSecureMode: appStore.isSecureMode,
+    enableAiModel: !!appStore.userInfo?.enableAiModel,
+  }),
+)
 
 interface KindChip {
   text: string

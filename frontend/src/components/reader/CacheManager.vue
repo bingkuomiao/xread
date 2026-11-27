@@ -2,7 +2,7 @@
   <div class="cache-manager" :style="{ background: theme.popup, color: theme.fontColor }">
     <div class="cache-header">
       <div>
-        <h3>缓存章节</h3>
+        <h3>{{ working && taskKind === 'export' ? '导出章节' : '缓存章节' }}</h3>
         <p v-if="store.book" class="cache-subtitle">{{ store.book.name }}</p>
       </div>
       <button class="close-btn" @click="store.backPanel()">
@@ -49,7 +49,8 @@
             </div>
             <div class="option-list">
               <button class="cache-opt primary" @click="exportWholeBook">
-                <span class="label">全本下载到本地</span>
+                <span class="label">全本导出到本地</span>
+                <span class="sub">适合永久保存使用</span>
               </button>
             </div>
           </section>
@@ -132,7 +133,8 @@
             <div class="option-list">
               <!-- 漫画导出 EPUB（图片打包进文件、可重新导入阅读），文字书导出 TXT，文案统一 -->
               <button class="cache-opt primary" @click="isComic ? exportComicEpub(0) : exportWholeBook()">
-                <span class="label">全本下载到本地</span>
+                <span class="label">全本导出到本地</span>
+                <span class="sub">适合永久保存使用</span>
               </button>
             </div>
           </section>
@@ -158,6 +160,7 @@ const isComic = computed(() => isComicBookByContent(store.displayContent) && !is
 // 重新打开面板时读到的仍是同一份进度，可继续查看并点「停止」中断。
 const {
   working,
+  taskKind,
   progress,
   currentStatus,
   currentChapterName,

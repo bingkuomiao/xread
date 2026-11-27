@@ -38,6 +38,9 @@ export const useAppStore = defineStore('app', () => {
 
   // ─── User ───
   const userInfo = ref<UserInfo | null>(null)
+  // 用户信息请求是否已结束（成功或失败）。书架首屏不等该请求，
+  // 用此标志避免依赖权限的 UI（如 AI 入口）在密码模式下先闪现再隐藏。
+  const userInfoLoaded = ref(false)
   const isSecureMode = ref(false)
   const needSecureKey = ref(false)
   const secureKeyRequired = ref(false)
@@ -96,6 +99,8 @@ export const useAppStore = defineStore('app', () => {
       }
     } catch {
       isLoggedIn.value = false
+    } finally {
+      userInfoLoaded.value = true
     }
   }
 
@@ -374,7 +379,7 @@ export const useAppStore = defineStore('app', () => {
     exactMatch, setExactMatch, toggleExactMatch,
     searchAllByDefault, setSearchAllByDefault, toggleSearchAllByDefault,
     matchCoverByIdle, setMatchCoverByIdle, toggleMatchCoverByIdle,
-    userInfo, isSecureMode, needSecureKey, secureKeyRequired, adminAuthorized, publicRead,
+    userInfo, userInfoLoaded, isSecureMode, needSecureKey, secureKeyRequired, adminAuthorized, publicRead,
     canManageBookSources, secureKey, isLoggedIn,
     versionUpdate, versionUpdateLoading, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
     fetchUserInfo, setUser, clearUser, setSecureKey, updateUserInfo, checkVersionUpdate, dismissVersionUpdateReminder,

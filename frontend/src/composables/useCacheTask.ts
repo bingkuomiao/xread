@@ -17,6 +17,8 @@ import { isComicContent } from '../utils/epubExport'
  * 只有显式调用 stopWorking() 才会中断服务端 SSE / 浏览器缓存循环。
  */
 const working = ref(false)
+/** 当前任务类型：导出到本地 or 章节缓存（供面板标题区分显示） */
+const taskKind = ref<'export' | 'cache'>('cache')
 const progress = ref(0)
 const currentStatus = ref('准备中...')
 const currentChapterName = ref('')
@@ -66,6 +68,7 @@ export function useCacheTask() {
     if (!store.book) return
     stopWorking()
     exportSignal = { cancelled: false }
+    taskKind.value = 'export'
     working.value = true
     progress.value = 0
     currentStatus.value = '准备导出...'
@@ -107,6 +110,7 @@ export function useCacheTask() {
     if (!store.book || isLocalBook(store.book)) return
     stopWorking()
     exportSignal = { cancelled: false }
+    taskKind.value = 'export'
     working.value = true
     progress.value = 0
     currentStatus.value = '准备导出漫画...'
@@ -159,6 +163,7 @@ export function useCacheTask() {
   function startServerCaching(count: number) {
     if (!store.book || isLocalBook(store.book)) return
     stopWorking()
+    taskKind.value = 'cache'
     working.value = true
     progress.value = 0
     currentStatus.value = '连接服务端缓存任务...'
@@ -216,6 +221,7 @@ export function useCacheTask() {
     if (!store.book || isLocalBook(store.book)) return
     stopWorking()
     browserSignal = { cancelled: false }
+    taskKind.value = 'cache'
     working.value = true
     progress.value = 0
     currentStatus.value = '准备浏览器缓存...'
@@ -270,6 +276,7 @@ export function useCacheTask() {
 
   return {
     working,
+    taskKind,
     progress,
     currentStatus,
     currentChapterName,
