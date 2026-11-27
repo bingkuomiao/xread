@@ -3,8 +3,9 @@ import type { Book, BookChapter, BookGroup } from '../types'
 import { appendAuthQueryParams } from '../utils/secureAccess'
 import { sanitizeBook, sanitizeBooks } from '../utils/cleanText'
 import { searchBookMultiOnce } from './search'
-import { pickBestMetadata } from '../utils/localBookMatch'
+import { pickBestMetadata, isPlaceholderAuthor } from '../utils/localBookMatch'
 import { isLocalBook } from '../utils/localBook'
+import { getCachedCover, setCachedCover } from '../utils/localCoverCache'
 
 export function getBookshelf() {
   return http.get<Book[]>('/getBookshelf').then((r) => sanitizeBooks(r.data))
@@ -61,6 +62,31 @@ export function exportLocalBookText(bookUrl: string): Promise<{ text: string; st
     .then((r) => r.data)
 }
 
+/** 本地书正文备份条目：文件内容为 base64，bookUrl 保持不变以便原样恢复。 */
+export interface LocalBookFileData {
+  path: string
+  content: string
+}
+export interface LocalBookBackupData {
+  bookUrl: string
+  files: LocalBookFileData[]
+}
+
+/**
+ * 批量导出本地书正文（原始文件 + 章节索引），供 WebDAV 备份包含正文。
+ * bookUrl 原样返回，恢复时按相同 hash 写回，保证打开书签/进度对得上。
+ */
+export function exportLocalBooksData(bookUrls: string[]): Promise<LocalBookBackupData[]> {
+  return http.post<{ books: LocalBookBackupData[] }>('/exportLocalBooks', { bookUrls })
+    .then((r) => r.data?.books ?? [])
+}
+
+/** 按原 bookUrl 写回本地书正文，返回成功恢复的书数。 */
+export function importLocalBooksData(books: LocalBookBackupData[]): Promise<number> {
+  return http.post<{ imported: number }>('/importLocalBooks', { books })
+    .then((r) => r.data?.imported ?? 0)
+}
+
 export interface EnrichResult {
   cover: boolean
   intro: boolean
@@ -111,6 +137,20 @@ export function enrichLocalBookMeta(book: Partial<Book>): Promise<EnrichResult> 
     if (book.customCoverUrl || book.coverUrl) return { ...EMPTY_ENRICH }
 
     try {
+      // 0. 封面复用缓存：同一本书（书名+作者）之前匹配过封面时直接复用，
+      //    跳过昂贵的多书源搜索。本地书重复导入产生新 bookUrl 也能命中。
+      const cached = getCachedCover(name, book.author)
+      if (cached) {
+        const updated: Book = {
+          ...(book as Book),
+          ...(cached.coverUrl ? { customCoverUrl: cached.coverUrl } : {}),
+          ...(cached.intro && !(book as Book).intro ? { intro: cached.intro } : {}),
+          ...(cached.author && isPlaceholderAuthor(book.author) ? { author: cached.author } : {}),
+        }
+        await enqueueBookSave(updated)
+        return { cover: !!cached.coverUrl, intro: !!cached.intro, author: !!cached.author, searched: 0 }
+      }
+
       // 1. 多书源聚合搜索（统一走 SSE 流式接口，与切换书源推荐同源；无 EventSource 环境自动回退普通接口）
       const candidates = await searchBookMultiOnce({ key: name })
       // 2. 前端匹配择优
@@ -121,6 +161,8 @@ export function enrichLocalBookMeta(book: Partial<Book>): Promise<EnrichResult> 
       if (!cover && !intro && !author) {
         return { ...EMPTY_ENRICH, searched: candidates.length }
       }
+      // 2.5 命中结果写入复用缓存，供下次同书重复导入直接复用。
+      setCachedCover(name, book.author, best)
       // 3. 按值写回：只改这四项，其余字段原样保留。
       //    必须走单本 saveBook（经串行队列），不能用全量覆盖的 saveBooks，
       //    否则会把整架清空成只剩这一本。

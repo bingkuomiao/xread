@@ -1069,6 +1069,7 @@ impl BookService {
 
     pub async fn save_book(&self, user_ns: &str, mut book: Book) -> Result<Book, AppError> {
         sanitize_book_urls(&mut book);
+        sanitize_book_display(&mut book);
         if book.origin.trim().is_empty() {
             return Err(AppError::BadRequest("missing origin".to_string()));
         }
@@ -1110,7 +1111,9 @@ impl BookService {
             }
             list[i] = book.clone();
         } else {
-            list.push(book.clone());
+            // 新书置顶：与前端「新加入的书排最前」语义对齐，使所有前端走单本保存时行为一致，
+            // 不依赖前端全量覆盖（saveBooks）来修正顺序。
+            list.insert(0, book.clone());
         }
 
         self.write_bookshelf(user_ns, &list).await?;
@@ -1121,6 +1124,7 @@ impl BookService {
         let mut normalized = Vec::with_capacity(books.len());
         for mut book in books {
             sanitize_book_urls(&mut book);
+            sanitize_book_display(&mut book);
             if book.origin.trim().is_empty() {
                 return Err(AppError::BadRequest("missing origin".to_string()));
             }
@@ -1411,6 +1415,9 @@ impl BookService {
         };
         for book in &mut list {
             sanitize_book_urls(book);
+            // 读取兜底清洗：兼容历史已存脏数据（写入清洗上线前已入库的书）。
+            // 清洗幂等，前端再清一次无副作用。
+            sanitize_book_display(book);
         }
         Ok(list)
     }
@@ -1869,6 +1876,36 @@ fn sanitize_book_urls(book: &mut Book) {
     }
 }
 
+/// 清洗书籍展示字段（与前端 cleanText.ts 对齐），让所有前端拿到一致的干净数据。
+/// 只作用于展示文本，不碰 URL/标识字段；清洗幂等，前端再清一次无副作用。
+fn sanitize_book_display(book: &mut Book) {
+    use crate::util::text::clean_display_text;
+
+    book.name = clean_display_text(&book.name, "name", false);
+    book.author = clean_display_text(&book.author, "author", false);
+    if let Some(v) = &book.intro {
+        book.intro = Some(clean_display_text(v, "intro", true));
+    }
+    if let Some(v) = &book.origin_name {
+        book.origin_name = Some(clean_display_text(v, "originName", false));
+    }
+    if let Some(v) = &book.kind {
+        book.kind = Some(clean_display_text(v, "kind", false));
+    }
+    if let Some(v) = &book.latest_chapter_title {
+        book.latest_chapter_title = Some(clean_display_text(v, "latestChapterTitle", false));
+    }
+    if let Some(v) = &book.dur_chapter_title {
+        book.dur_chapter_title = Some(clean_display_text(v, "durChapterTitle", false));
+    }
+    if let Some(v) = &book.word_count {
+        book.word_count = Some(clean_display_text(v, "wordCount", false));
+    }
+    if let Some(v) = &book.update_time {
+        book.update_time = Some(clean_display_text(v, "updateTime", false));
+    }
+}
+
 fn recover_bookshelf_entries(data: &str) -> Option<Vec<Book>> {
     let mut recovered = Vec::new();
     let mut seen = HashSet::new();
@@ -2121,6 +2158,48 @@ mod tests {
         assert!(!target_path.exists());
         assert!(!target_alt_path.exists());
         assert!(other_path.exists(), "无关封面不应被删除");
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+    }
+
+    #[tokio::test]
+    async fn save_book_prepends_new_book_and_keeps_existing_order() {
+        // 新加入的书必须置顶（list.insert(0)），已存在的书更新时保持原位，
+        // 保证所有前端走单本保存时「新书在前、旧书顺序稳定」行为一致。
+        let storage_dir =
+            std::env::temp_dir().join(format!("reader-rust-save-order-{}", std::process::id()));
+        let service = BookService::new(
+            HttpClient::new(1, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let user_ns = "save-order-test";
+
+        let make = |name: &str, url: &str| Book {
+            name: name.to_string(),
+            author: "作者".to_string(),
+            book_url: url.to_string(),
+            origin: "https://source.example".to_string(),
+            ..Default::default()
+        };
+
+        // 先加入 A、B，最后加入的书应排在最前 → [B, A]
+        service.save_book(user_ns, make("A", "http://s/a")).await.unwrap();
+        service.save_book(user_ns, make("B", "http://s/b")).await.unwrap();
+        let shelf = service.get_bookshelf(user_ns).await.unwrap();
+        assert_eq!(shelf.len(), 2);
+        assert_eq!(shelf[0].name, "B", "新加入的 B 应置顶");
+        assert_eq!(shelf[1].name, "A");
+
+        // 更新已存在的 A（仅改 intro），不应改变顺序 → 仍是 [B, A]
+        let mut updated_a = make("A", "http://s/a");
+        updated_a.intro = Some("更新后的简介".to_string());
+        service.save_book(user_ns, updated_a).await.unwrap();
+        let shelf = service.get_bookshelf(user_ns).await.unwrap();
+        assert_eq!(shelf[0].name, "B", "更新已有书不应把它挪到最前");
+        assert_eq!(shelf[1].name, "A");
+        assert_eq!(shelf[1].intro.as_deref(), Some("更新后的简介"));
 
         let _ = tokio::fs::remove_dir_all(&storage_dir).await;
     }

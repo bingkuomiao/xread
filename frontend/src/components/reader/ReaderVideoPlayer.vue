@@ -33,12 +33,32 @@
         </button>
       </Teleport>
 
-      <div class="reader-artplayer-container" ref="artContainerRef"></div>
+      <div
+        class="reader-artplayer-container"
+        :class="{ 'rv-narrow': isNarrowPlayer }"
+        ref="artContainerRef"
+      ></div>
 
-      <!-- 视频加载动画：首帧就绪前盖住黑屏居中显示，画面出现后立即隐藏 -->
-      <div v-if="videoLoading" class="rv-loading-mask" aria-label="视频加载中">
-        <div class="rv-loading-spinner"></div>
-        <div class="rv-loading-text">加载中…</div>
+      <!-- 视频转换下载进度：转码期间持续显示；原生全屏时它作为 .art-video-player 的
+           兄弟节点被浏览器自动隐藏，退出全屏后只要仍在转码就自动恢复显示。
+           「关闭」只是隐藏弹窗、后台继续转码；「取消」真正中止任务。 -->
+      <div v-if="downloadConverting" class="rv-download-progress" aria-label="视频转换下载中">
+        <div class="rv-download-progress-card rv-glass">
+          <div class="rv-download-spinner"></div>
+          <div class="rv-download-text">{{ downloadStatusText }}</div>
+          <div class="rv-download-bar" :class="{ 'is-determinate': downloadPercent > 0 }">
+            <span
+              class="rv-download-bar-inner"
+              :style="downloadPercent > 0 ? { width: downloadPercent + '%', animation: 'none' } : undefined"
+            ></span>
+          </div>
+          <div v-if="downloadPercent > 0" class="rv-download-percent">{{ downloadPercent }}%</div>
+          <div class="rv-download-hint">转换完成后自动保存到本地</div>
+          <div class="rv-download-actions">
+            <button class="rv-dl-btn rv-dl-cancel" @click.stop="cancelDownload">取消下载</button>
+            <button class="rv-dl-btn rv-dl-close" @click.stop="closeDownloadPopup">继续下载</button>
+          </div>
+        </div>
       </div>
 
       <!-- 更多面板：Teleport 进 ArtPlayer 的 .art-video-player 内部，
@@ -100,17 +120,21 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import Artplayer from 'artplayer'
 import Hls from 'hls.js'
 import { buildAuthHeaderValues } from '../../utils/secureAccess'
+import { buildVideoFileName } from '../../utils/localBook'
+import { isBackgroundTaskActive } from '../../utils/videoDownloadSession'
 
 const props = withDefaults(
   defineProps<{
     url: string
     title?: string
+    bookTitle?: string
     isNight?: boolean
     hasPrev?: boolean
     hasNext?: boolean
   }>(),
   {
     title: '',
+    bookTitle: '',
     isNight: false,
     hasPrev: false,
     hasNext: false,
@@ -156,9 +180,57 @@ const titleHidden = ref(false)
 // 顶部关闭/更多按钮、底部选集/全屏按钮统一跟随它显隐——一起出现、一起隐藏，
 // 彻底避免「上面按钮显示、下面控制栏隐藏」这种不同步状态。
 const controlsVisible = ref(true)
-// 视频首帧是否就绪：就绪前显示居中加载动画，就绪后隐藏
-const videoLoading = ref(true)
-let loadingFallbackTimer: number | null = null
+// m3u8 转码下载：弹窗可见性 + 后台任务状态。
+// 弹窗「关闭」只隐藏 downloadConverting，轮询/下载在后台继续（taskId 仍在）。
+// 「取消」才真正中止任务。原生全屏时遮罩随兄弟节点被浏览器隐藏、退出后恢复。
+const downloadConverting = ref(false)
+const downloadPercent = ref(0)
+// pending/running/done/failed/cancelled —— 用于文案与是否继续轮询
+const downloadPhase = ref<'pending' | 'running' | 'done' | 'failed' | 'cancelled'>('pending')
+let downloadTaskId = ''
+let downloadPollTimer: number | null = null
+const downloadStatusText = computed(() => {
+  switch (downloadPhase.value) {
+    case 'done':
+      return '转换完成，正在保存…'
+    case 'failed':
+      return '转换失败'
+    case 'cancelled':
+      return '已取消下载'
+    default:
+      return downloadPercent.value > 0 ? '正在转换并下载视频…' : '正在准备转换…'
+  }
+})
+
+/** 停止轮询（不中止任务；关闭弹窗时用）。 */
+function stopDownloadPolling() {
+  if (downloadPollTimer !== null) {
+    window.clearInterval(downloadPollTimer)
+    downloadPollTimer = null
+  }
+}
+
+/** 彻底清理一次下载会话状态（切集/组件销毁/任务结束时用）。 */
+function resetDownloadSession() {
+  stopDownloadPolling()
+  downloadTaskId = ''
+  downloadPercent.value = 0
+  downloadPhase.value = 'pending'
+}
+
+/**
+ * 是否存在当前视频「后台进行中」的下载任务（点了「继续下载」关闭弹窗后的状态）。
+ * 条件：有 taskId 且轮询仍在运行，且阶段为 pending/running（未终结）。
+ * done 会在 saveConvertedVideo 里 stop 轮询并 reset；failed/cancelled 也会 stop 轮询，
+ * 因此这些终结态不会被误判为后台活跃，再次点击下载会正常开启新任务。
+ */
+function hasActiveBackgroundTask(): boolean {
+  return isBackgroundTaskActive(
+    downloadTaskId,
+    downloadPollTimer !== null,
+    downloadPhase.value,
+  )
+}
 
 // 更多面板 / 选集面板与播放选项（两者互斥，同时最多显示一个）
 const morePanelVisible = ref(false)
@@ -187,6 +259,15 @@ const wrapperStyle = computed(() => {
     width: '100%',
     height: '56vh',
   }
+})
+
+// 窄播放器（典型：竖屏短剧在 PC 上容器宽度被压到很窄）。
+// 此时 ArtPlayer 底部控制栏的左侧「播放+时间+音量」+右侧「选集+全屏」会超出容器宽度，
+// 导致右侧按钮溢出被裁。手机上 ArtPlayer 自带 .art-mobile 会压缩控件所以正常，
+// PC 上没有该类，需要我们主动加 .rv-narrow 压缩控制栏尺寸，保证右侧按钮完整可见。
+const isNarrowPlayer = computed(() => {
+  // 阈值 460px：低于此宽度时控制栏控件会明显拥挤
+  return !!boxWidth.value && boxWidth.value < 460
 })
 
 function destroyHls() {
@@ -233,69 +314,191 @@ function onWindowResize() {
 
 async function downloadCurrentVideo() {
   if (!props.url) return
-  const title = (props.title || 'video').trim()
-  const safeTitle = title.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80)
   const isM3u8 = /\.m3u8(?:\?|$)/i.test(props.url)
+  // 文件名：书名 + 章节标题（章节常是「1」这种序号，单用它会得到 1.mp4）。
+  // 扩展名：m3u8 统一转 mp4；直链沿用 URL 后缀。
+  const ext = isM3u8 ? 'mp4' : (props.url.match(/\.([a-z0-9]{2,5})(?:\?|#|$)/i)?.[1] || 'mp4').toLowerCase()
+  const fileName = buildVideoFileName(props.bookTitle || '', props.title || '', ext)
+  // 传给后端的 filename 不含扩展名（后端统一补 .mp4）
+  const fileNameBase = fileName.replace(/\.[^.]+$/, '')
 
   closeAllPanels()
 
-  // m3u8 无法直接下载成可播放文件：交给后端用 ffmpeg 合并转成 mp4 再下载。
+  // m3u8 无法直接下载成可播放文件：交给后端用 ffmpeg 合并转成 mp4。
+  // 采用任务制：启动后轮询真实进度，转完自动下载；转码期间不暂停播放。
   if (isM3u8) {
-    // 转码期间暂停播放，避免边转边下占用带宽影响成功率和流畅度
-    const wasPlaying = !!(art && art.video && !art.video.paused)
-    if (wasPlaying) art?.pause()
-    if (art) art.notice.show = '正在转换视频，请稍候…'
-    try {
-      const { accessToken, secureKey } = buildAuthHeaderValues(localStorage)
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      if (accessToken) headers.Authorization = accessToken
-      if (secureKey) headers['X-Secure-Key'] = secureKey
-
-      const response = await fetch('/reader3/convertVideoToMp4', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ url: props.url }),
-      })
-      if (!response.ok) {
-        let msg = `HTTP ${response.status}`
-        try {
-          const data = await response.json()
-          if (data?.errorMsg) msg = data.errorMsg
-        } catch {}
-        throw new Error(msg)
-      }
-      const blob = await response.blob()
-      const objectUrl = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = objectUrl
-      a.download = `${safeTitle}.mp4`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      // 延迟释放，确保 WebView 已读完 blob
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
-      if (art) art.notice.show = '已开始下载视频'
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : '未知错误'
-      if (art) art.notice.show = `转换失败：${msg}`
-    } finally {
-      if (wasPlaying) art?.play()
+    // 若当前视频已有后台进行中的任务（此前点了「继续下载」关闭弹窗），
+    // 再次点击下载只重新弹出原进度弹窗，不新建任务，避免重复转码/任务并存。
+    if (hasActiveBackgroundTask()) {
+      downloadConverting.value = true
+      // 立即同步一次进度，弹窗弹出即显示真实进度（轮询本身也在继续）
+      void pollDownloadProgress()
+      return
     }
+    await startM3u8Download(fileNameBase, fileName)
     return
   }
 
   // 普通直链：保持原有 <a download> 行为
-  const match = props.url.match(/\.([a-z0-9]{2,4})(?:\?|#|$)/i)
-  const ext = match ? match[1].toLowerCase() : 'mp4'
   const a = document.createElement('a')
   a.href = props.url
-  a.download = `${safeTitle}.${ext}`
+  a.download = fileName
   a.target = '_blank'
   a.rel = 'noopener'
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
   if (art) art.notice.show = '已开始下载本集视频'
+}
+
+/** 拼装当前用户的认证头（与书源代理一致）。 */
+function authHeaders(json = false): Record<string, string> {
+  const { accessToken, secureKey } = buildAuthHeaderValues(localStorage)
+  const headers: Record<string, string> = {}
+  if (json) headers['Content-Type'] = 'application/json'
+  if (accessToken) headers.Authorization = accessToken
+  if (secureKey) headers['X-Secure-Key'] = secureKey
+  return headers
+}
+
+/** 启动 m3u8 后台转换任务，随后轮询进度。 */
+async function startM3u8Download(fileNameBase: string, fileName: string) {
+  // 若上一个任务还在跑，先停掉旧轮询（不重复启动 ffmpeg 由后端并发闸门兜底）
+  stopDownloadPolling()
+  downloadPercent.value = 0
+  downloadPhase.value = 'pending'
+  downloadConverting.value = true
+
+  try {
+    const response = await fetch('/reader3/convertVideoToMp4', {
+      method: 'POST',
+      headers: authHeaders(true),
+      body: JSON.stringify({ url: props.url, filename: fileNameBase }),
+    })
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.isSuccess) {
+      const msg = data?.errorMsg || `HTTP ${response.status}`
+      throw new Error(msg)
+    }
+    const taskId = data?.data?.task_id
+    if (!taskId) throw new Error('未获取到有效的下载任务')
+    downloadTaskId = taskId
+    downloadPhase.value = 'running'
+    // 保存最终文件名供下载结果使用
+    pendingDownloadFileName = fileName
+    // 立即拉取一次，随后定时轮询
+    await pollDownloadProgress()
+    downloadPollTimer = window.setInterval(pollDownloadProgress, 1000)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : '未知错误'
+    downloadPhase.value = 'failed'
+    if (art) art.notice.show = msg.startsWith('转换失败') ? msg : `转换失败：${msg}`
+    // 失败弹窗短暂展示后自动隐藏
+    window.setTimeout(() => {
+      if (downloadPhase.value === 'failed') downloadConverting.value = false
+    }, 2500)
+  }
+}
+
+/** 结果文件的最终名（含扩展名），启动任务时保存。 */
+let pendingDownloadFileName = 'video.mp4'
+
+/** 轮询一次任务进度；done 时下载结果，failed/cancelled 时提示并停止。 */
+async function pollDownloadProgress() {
+  const taskId = downloadTaskId
+  if (!taskId) return
+  try {
+    const response = await fetch(
+      `/reader3/convertVideoProgress?task_id=${encodeURIComponent(taskId)}`,
+      { headers: authHeaders() },
+    )
+    const wrapper = await response.json().catch(() => null)
+    if (!response.ok || !wrapper?.isSuccess) {
+      // 任务过期/丢失：停止，避免无限轮询
+      throw new Error(wrapper?.errorMsg || `HTTP ${response.status}`)
+    }
+    const p = wrapper.data || {}
+    const status = (p.status || 'pending') as 'pending' | 'running' | 'done' | 'failed' | 'cancelled'
+    if (typeof p.percent === 'number') {
+      downloadPercent.value = Math.max(0, Math.min(100, p.percent))
+    }
+    downloadPhase.value = status
+
+    if (status === 'done') {
+      stopDownloadPolling()
+      await saveConvertedVideo(taskId)
+      return
+    }
+    if (status === 'failed') {
+      stopDownloadPolling()
+      const err = typeof p.error === 'string' && p.error ? p.error : '转换失败'
+      if (art) art.notice.show = err.startsWith('转换失败') ? err : `转换失败：${err}`
+      window.setTimeout(() => {
+        if (downloadPhase.value === 'failed') downloadConverting.value = false
+      }, 2500)
+      return
+    }
+    if (status === 'cancelled') {
+      stopDownloadPolling()
+      downloadConverting.value = false
+      return
+    }
+  } catch {
+    // 单次轮询失败不打断，网络抖动可自恢复；连续失败由整体超时兜底
+  }
+}
+
+/** 从后端拉取转好的 mp4 并触发浏览器下载。 */
+async function saveConvertedVideo(taskId: string) {
+  try {
+    const response = await fetch(
+      `/reader3/convertVideoResult?task_id=${encodeURIComponent(taskId)}`,
+      { headers: authHeaders() },
+    )
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const blob = await response.blob()
+    const objectUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = objectUrl
+    a.download = pendingDownloadFileName
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
+    if (art) art.notice.show = '已开始下载视频'
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : '未知错误'
+    if (art) art.notice.show = `保存失败：${msg}`
+  } finally {
+    downloadConverting.value = false
+    resetDownloadSession()
+  }
+}
+
+/** 「关闭」：隐藏弹窗，后台转换与轮询继续，转完自动下载；可继续播放视频。 */
+function closeDownloadPopup() {
+  downloadConverting.value = false
+}
+
+/** 「取消」：真正中止后端任务、停止轮询、隐藏弹窗。 */
+async function cancelDownload() {
+  const taskId = downloadTaskId
+  stopDownloadPolling()
+  if (taskId) {
+    try {
+      await fetch('/reader3/convertVideoCancel', {
+        method: 'POST',
+        headers: authHeaders(true),
+        body: JSON.stringify({ task_id: taskId }),
+      })
+    } catch {
+      // 取消请求失败也隐藏弹窗；后端有 TTL 兜底清理
+    }
+  }
+  downloadPhase.value = 'cancelled'
+  downloadConverting.value = false
+  resetDownloadSession()
+  if (art) art.notice.show = '已取消视频下载'
 }
 
 /**
@@ -374,15 +577,6 @@ function onDocumentPointerDown(event: PointerEvent) {
   }
 }
 
-/** 首帧就绪：隐藏加载动画，并清理兜底定时器（多次调用幂等）。 */
-function markVideoReady() {
-  if (!videoLoading.value) return
-  videoLoading.value = false
-  if (loadingFallbackTimer !== null) {
-    window.clearTimeout(loadingFallbackTimer)
-    loadingFallbackTimer = null
-  }
-}
 function toggleMorePanel() {
   const show = !morePanelVisible.value
   morePanelVisible.value = show
@@ -439,11 +633,9 @@ function initPlayer() {
     art = null
   }
   destroyHls()
-  if (loadingFallbackTimer !== null) {
-    window.clearTimeout(loadingFallbackTimer)
-    loadingFallbackTimer = null
-  }
-  videoLoading.value = true
+  // 切集/重建播放器：停止旧轮询并重置弹窗状态；不取消后端任务（后台继续下载）
+  resetDownloadSession()
+  downloadConverting.value = false
   videoRatio.value = null
   boxWidth.value = null
   boxHeight.value = null
@@ -569,20 +761,10 @@ function initPlayer() {
   art.on('video:loadedmetadata', () => {
     fitToVideo()
   })
-  // 首帧可播放：画面即将出现，隐藏加载动画
+  // 首帧可播放：按真实分辨率自适应，消除黑边
   art.on('video:canplay', () => {
     fitToVideo()
-    markVideoReady()
   })
-  art.on('video:playing', () => {
-    markVideoReady()
-  })
-  // 兜底：极端情况下 canplay/playing 均未触发（如弱网、部分 WebView），
-  // 10 秒后仍隐藏遮罩，避免永久转圈挡住画面。
-  loadingFallbackTimer = window.setTimeout(() => {
-    loadingFallbackTimer = null
-    markVideoReady()
-  }, 10_000)
 
   // 控制层显隐：顶部关闭/更多按钮、底部选集/全屏按钮、章节标题、更多/选集面板
   // 全部由同一个 control 事件统一驱动——一起出现、一起隐藏，不再各用一套状态，
@@ -652,10 +834,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   destroyHls()
-  if (loadingFallbackTimer !== null) {
-    window.clearTimeout(loadingFallbackTimer)
-    loadingFallbackTimer = null
-  }
+  // 组件销毁：停止轮询；后端任务按 TTL 自行完成/清理
+  stopDownloadPolling()
   window.removeEventListener('resize', onWindowResize)
   document.removeEventListener('pointerdown', onDocumentPointerDown)
   if (resizeObserver) {
@@ -739,33 +919,146 @@ onBeforeUnmount(() => {
 .rv-close-btn:active,
 .rv-more-top-btn:active { opacity: 0.7; }
 
-/* 加载遮罩：盖在播放器之上、面板之下，首帧就绪前居中显示旋转动画 */
-.rv-loading-mask {
+/* 转换下载进度遮罩：盖在播放器之上、面板之下。
+   作为 .art-video-player 的兄弟节点，原生全屏时被浏览器自动隐藏，退出后恢复。 */
+.rv-download-progress {
   position: absolute;
   inset: 0;
   z-index: 60;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  pointer-events: none;
+  background: rgba(0, 0, 0, 0.34);
+  pointer-events: none; /* 不拦截手势，转码中仍可点画面唤出控制层 */
 }
-.rv-loading-spinner {
-  width: 38px;
-  height: 38px;
+.rv-download-progress-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 20px 26px;
+  border-radius: 16px;
+  min-width: 220px;
+}
+.rv-download-spinner {
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
-  border: 3px solid rgba(255, 255, 255, 0.2);
+  border: 3px solid rgba(255, 255, 255, 0.18);
   border-top-color: var(--color-primary, #f43f5e);
   animation: rv-spin 0.8s linear infinite;
 }
-.rv-loading-text {
+.rv-download-text {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.92);
+  letter-spacing: 0.5px;
+}
+/* 不确定进度条：左右往复动效，表达"进行中"而非虚假百分比 */
+.rv-download-bar {
+  width: 180px;
+  height: 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.16);
+  overflow: hidden;
+}
+.rv-download-bar-inner {
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--color-primary, #f43f5e);
+  animation: rv-progress-slide 1.2s ease-in-out infinite;
+}
+/* 有真实进度时：确定性宽度、平滑过渡（animation 由内联 style 置 none） */
+.rv-download-bar-inner {
+  transition: width 0.4s ease;
+}
+.rv-download-percent {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.7);
-  letter-spacing: 1px;
+  font-weight: 700;
+  color: var(--color-primary-light, var(--color-primary, #f43f5e));
+  min-height: 14px;
+}
+.rv-download-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+}
+/* 操作按钮区：遮罩整体 pointer-events:none 不拦截视频手势，唯独按钮要可点 */
+.rv-download-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 2px;
+  pointer-events: auto;
+}
+.rv-dl-btn {
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.rv-dl-btn:active { opacity: 0.7; }
+.rv-dl-close {
+  background: var(--color-primary, #f43f5e);
+  border-color: transparent;
 }
 @keyframes rv-spin {
   to { transform: rotate(360deg); }
+}
+@keyframes rv-progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+/* ===== 窄播放器（竖屏短剧在 PC 上）控制栏压缩 =====
+   fitToVideo 会把容器宽度设成视频真实宽度，竖屏短剧可窄到 ~300px。
+   ArtPlayer 默认左侧「播放+时间(D/MM:SS)+音量」+ 右侧「选集+全屏」在窄容器里会溢出，
+   右侧按钮被 .reader-artplayer-wrapper 的 overflow:hidden 裁掉（手机有 .art-mobile
+   自动压缩控件所以正常，PC 无此类）。这里在窄容器下压缩各控件尺寸与时间字体，
+   并把时间收紧为当前时间，确保右侧选集/全屏按钮完整可见。 */
+.reader-artplayer-container.rv-narrow :deep(.art-video-player .art-controls .art-control) {
+  min-width: 28px;
+  padding: 0 2px;
+}
+.reader-artplayer-container.rv-narrow :deep(.art-video-player .art-controls .art-time) {
+  font-size: 11px;
+  transform: scale(0.9);
+  transform-origin: left center;
+}
+.reader-artplayer-container.rv-narrow :deep(.art-video-player .art-controls .art-custom-btn.rv-glass-btn) {
+  width: 28px;
+  margin: 0 1px;
+}
+/* 极窄时隐藏音量控件，把空间让给右侧选集/全屏按钮 */
+.reader-artplayer-container.rv-narrow :deep(.art-video-player .art-controls .art-control-volume) {
+  display: none;
+}
+/* 右侧按钮组贴住内缘，负 margin 归零，避免溢出裁切 */
+.reader-artplayer-container.rv-narrow :deep(.art-video-player .art-controls .art-controls-right) {
+  margin-right: 4px !important;
+}
+
+/* ===== 错误/提示文字：限制宽度并允许换行，避免长文案右端顶到右上角按钮 =====
+   .art-notice 默认 inset:0、width:100%、flex 单行撑开，错误文案较长时会横向延伸到
+   右上角「更多」按钮（z-index 95 > notice 80）下方被遮挡。这里让提示块居中、限制
+   最大宽度、允许换行抬高行距，长文案改为多行显示，避开右上角按钮区域。 */
+.reader-artplayer-container :deep(.art-video-player .art-notice) {
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 16%;
+}
+.reader-artplayer-container :deep(.art-video-player .art-notice .art-notice-inner) {
+  max-width: min(78%, 520px);
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  text-align: center;
+  padding: 8px 12px;
 }
 
 /* ===== 玻璃拟态公共样式：视频面板与按钮统一增强玻璃感（深色玻璃，适配黑色播放底） ===== */

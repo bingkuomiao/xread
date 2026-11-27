@@ -16,6 +16,7 @@ const m = vi.hoisted(() => ({
   saveBookSources: vi.fn(),
   captureLocalState: vi.fn(),
   applyLocalState: vi.fn(),
+  importLocalBooksData: vi.fn(),
 }))
 
 vi.mock('../api/bookshelf', () => ({
@@ -24,6 +25,8 @@ vi.mock('../api/bookshelf', () => ({
   saveBookGroup: m.saveBookGroup,
   getBookGroups: m.getBookGroups,
   deleteBooks: vi.fn(() => { throw new Error('合并恢复不应调用 deleteBooks') }),
+  exportLocalBooksData: vi.fn(async () => []),
+  importLocalBooksData: m.importLocalBooksData,
 }))
 vi.mock('../api/bookmark', () => ({ getBookmarks: m.getBookmarks, saveBookmarks: m.saveBookmarks, deleteBookmarks: vi.fn() }))
 vi.mock('../api/replaceRule', () => ({ getReplaceRules: m.getReplaceRules, saveReplaceRules: m.saveReplaceRules, deleteReplaceRules: vi.fn() }))
@@ -114,5 +117,19 @@ describe('mergeWebdavBackup 合并恢复', () => {
     expect(storage.getItem('xread-exact-match')).toBe('true')
     // 当前独有的白名单 key 保留（不被清除）
     expect(storage.getItem('xread-search-all-default')).toBe('false')
+  })
+
+  it('合并时把备份中的本地书正文按原 bookUrl 写回', async () => {
+    m.getBookshelf.mockResolvedValue([])
+    const p = payload([])
+    p.localBookData = [{ bookUrl: 'local-txt:abc', files: [{ path: 'book.txt', content: 'eA==' }] }]
+    await mergeWebdavBackup(p)
+    expect(m.importLocalBooksData).toHaveBeenCalledWith(p.localBookData)
+  })
+
+  it('备份无本地书正文时不调用写回接口（兼容旧备份）', async () => {
+    m.getBookshelf.mockResolvedValue([])
+    await mergeWebdavBackup(payload([]))
+    expect(m.importLocalBooksData).not.toHaveBeenCalled()
   })
 })

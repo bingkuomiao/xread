@@ -9,6 +9,8 @@ export interface ExportProgress {
   total: number
   completed: number
   chapterTitle: string
+  /** 当前阶段：content=抓取正文，image=下载图片，pack=打包，undefined=小说导出 */
+  phase?: 'content' | 'image' | 'pack'
 }
 
 /**
@@ -253,7 +255,8 @@ export function revokeBatchDownloadItems(items: BatchDownloadItem[]) {
   for (const item of items) URL.revokeObjectURL(item.url)
 }
 
-function triggerBlobDownload(blob: Blob, fileName: string) {
+/** 直接触发一次文件下载（单本导出用；iOS 允许单次程序化下载，无需清单）。 */
+export function triggerBlobDownload(blob: Blob, fileName: string) {
   const objectUrl = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = objectUrl
@@ -340,6 +343,16 @@ export async function exportComicEpubToLocal(params: {
       bookSourceUrl: params.book.origin,
       signal: params.signal,
       fetchImage: params.fetchImage,
+      onPhase: (phase) => {
+        if (phase === 'download') {
+          params.onProgress?.({ total: 1, completed: 0, chapterTitle: '下载图片中', phase: 'image' })
+        } else {
+          params.onProgress?.({ total: 1, completed: 1, chapterTitle: '打包中', phase: 'pack' })
+        }
+      },
+      onImageProgress: (completed, total) => {
+        params.onProgress?.({ total, completed, chapterTitle: '下载图片中', phase: 'image' })
+      },
     })
     if (params.signal?.cancelled || result.bytes.length === 0) break
     downloadBytesAsFile(result.bytes, fileName)

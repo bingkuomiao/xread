@@ -231,6 +231,31 @@ export function buildStorageFileName(name: string, author: string): string {
   return a ? `《${n}》 作者：${a}.txt` : `《${n}》.txt`
 }
 
+/**
+ * 视频下载文件名：书名_章节标题.ext（如「皇明_第1集.mp4」），避免只显示序号 1.mp4。
+ * 清洗规则与导出文件名一致（去书名号/非法字符/首尾点），任一为空时退化为另一个，
+ * 都为空时用 video。扩展名仅接受 2-5 位字母数字，异常时回退 mp4。
+ */
+export function buildVideoFileName(bookName: string, chapterTitle: string, ext: string): string {
+  const clean = (s: string) =>
+    stripTitleMarks(s || '')
+      .trim()
+      .replace(/[\\/:*?"<>|\s]/g, '_')
+      .replace(/^\.+|\.+$/g, '')
+      .replace(/_+/g, '_')
+      .slice(0, 40)
+  const b = clean(bookName)
+  const c = clean(chapterTitle)
+  // 章节标题已含书名（如「皇明 第1集」）时直接用章节名（信息更全），避免「皇明_皇明」重复前缀
+  let base: string
+  if (!b || !c || b === c) base = b || c || 'video'
+  else if (c.includes(b)) base = c
+  else if (b.includes(c)) base = b
+  else base = `${b}_${c}`
+  const safeExt = /^[a-z0-9]{2,5}$/i.test(ext) ? ext.toLowerCase() : 'mp4'
+  return `${base.slice(0, 48)}.${safeExt}`
+}
+
 /** 漫画 EPUB 导出文件名，规范与 TXT 一致，仅扩展名不同。 */
 export function buildEpubFileName(name: string, author: string, volumeSuffix = ''): string {
   const sanitize = (s: string) => stripTitleMarks(s).trim().replace(/[\\/:*?"<>|\r\n]/g, '_')

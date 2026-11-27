@@ -172,6 +172,7 @@ import {
   beginBatchExport,
   takeBatchFiles,
   makeBatchDownloadItems,
+  triggerBlobDownload,
   revokeBatchDownloadItems,
   abortBatchExport,
   type BatchFile,
@@ -425,7 +426,10 @@ async function handleBulkExport() {
       parts.join('，') || '没有可下载的文件',
       failed > 0 ? (allFiles.length > 0 ? 'warning' : 'error') : 'success',
     )
-    if (allFiles.length > 0) {
+    if (allFiles.length === 1) {
+      // 只有一个文件：直接下载，无需弹清单让用户再点一次（单次程序化下载 iOS 也允许）
+      triggerBlobDownload(allFiles[0].blob, allFiles[0].fileName)
+    } else if (allFiles.length > 1) {
       downloadList.value = makeBatchDownloadItems(allFiles)
       showDownloadList.value = true
     }

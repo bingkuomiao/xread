@@ -34,6 +34,9 @@
         {{ unreadCount > 99 ? '99+' : unreadCount }}
       </div>
 
+      <!-- Never-opened badge：已加入书架但从未打开阅读（封面右下角） -->
+      <div v-if="isNeverOpened && !editMode" class="never-opened-badge">未读</div>
+
       <!-- Selection overlay -->
       <div v-if="editMode" class="selection-overlay">
         <div class="checkbox" :class="{ checked: selected }">
@@ -190,6 +193,17 @@ const unreadCount = computed(() => {
   const b = props.book as Book
   if (!b.totalChapterNum || b.durChapterIndex === undefined) return 0
   return Math.max(0, b.totalChapterNum - 1 - b.durChapterIndex)
+})
+
+/**
+ * 从未打开阅读：加入书架后 durChapterTime 为空，首次打开阅读时由阅读器写入时间戳并同步后端。
+ * 仅书架内书籍显示（搜索结果卡片 isSearch 时 durChapterTime 恒为空，需排除）。
+ */
+const isNeverOpened = computed(() => {
+  if (props.isSearch) return false
+  const b = props.book as Book
+  const t = b.durChapterTime
+  return t === undefined || t === null || t === 0
 })
 
 const browserCachedCount = computed(() => isLocalBook(asBook.value) ? 0 : Math.max(0, asBook.value.browserCachedChapterCount || 0))
@@ -387,6 +401,11 @@ const bookIntro = computed(() => {
   color: var(--color-text-tertiary);
 }
 
+/* 两个封面角标统一风格（第一版灰底玻璃质感 + 主题色文字）：
+   - 背景深灰半透明 + 模糊，不抢封面画面；
+   - 文字用主题亮色（--color-primary-light），随主题切换，加轻阴影保证在深底上清晰；
+   - 均紧贴封面边缘（0 间距），外侧圆角由 .card-cover 的 overflow:hidden 裁成封面圆角，
+     只保留内侧一个圆角，视觉上与封面轮廓完全对齐。 */
 .unread-badge {
   position: absolute;
   top: 8px;
@@ -402,6 +421,28 @@ const bookIntro = computed(() => {
   line-height: 15px;
   box-shadow: 0 6px 14px color-mix(in srgb, var(--color-primary) 28%, transparent);
   z-index: 1;
+}
+
+.never-opened-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  background: rgba(12, 14, 18, 0.66);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  color: var(--color-primary-light, var(--color-primary));
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  min-width: 18px;
+  text-align: center;
+  line-height: 15px;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.28);
+  z-index: 1;
+  pointer-events: none;
 }
 
 .card-delete-btn {

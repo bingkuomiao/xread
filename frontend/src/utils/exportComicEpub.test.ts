@@ -51,19 +51,26 @@ describe('exportComicEpubToLocal', () => {
     vi.mocked(getBookContent).mockImplementation(async ({ chapterUrl }) => `<img src="${chapterUrl}/1.jpg" /><img src="${chapterUrl}/2.jpg" />`)
   })
 
-  it('全本：产出单个 EPUB，文件名规范，进度覆盖全部章节', async () => {
-    const progress: number[] = []
+  it('全本：产出单个 EPUB，文件名规范，进度覆盖正文/图片/打包各阶段', async () => {
+    const progress: { completed: number; phase?: string }[] = []
     const result = await exportComicEpubToLocal({
       book: comicBook,
       chapters,
       volumeSize: 0,
       fetchImage,
-      onProgress: (p) => progress.push(p.completed),
+      onProgress: (p) => progress.push({ completed: p.completed, phase: p.phase }),
     })
     expect(result.files).toEqual(['《妖神记》 作者：踏雪动漫.epub'])
     expect(result.totalImages).toBe(10) // 5 章 * 2 图
     expect(result.failedImages).toEqual([])
-    expect(progress).toEqual([1, 2, 3, 4, 5])
+    // 抓正文阶段：1~5 章
+    expect(progress.filter((p) => !p.phase).map((p) => p.completed)).toEqual([1, 2, 3, 4, 5])
+    // 图片阶段：0 起，逐张递增到 10（image 进度回调）
+    const imageProgress = progress.filter((p) => p.phase === 'image').map((p) => p.completed)
+    expect(imageProgress[0]).toBe(0)
+    expect(imageProgress[imageProgress.length - 1]).toBe(10)
+    // 打包阶段：相位标记存在
+    expect(progress.some((p) => p.phase === 'pack')).toBe(true)
     expect(clicks).toEqual(['《妖神记》 作者：踏雪动漫.epub'])
   })
 

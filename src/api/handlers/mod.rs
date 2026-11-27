@@ -4,6 +4,7 @@ mod ai_proxy;
 mod book;
 mod book_group;
 mod book_source;
+mod local_book_data;
 mod bookmark;
 mod replace_rule;
 mod rss;
@@ -17,6 +18,7 @@ pub use ai_model::*;
 pub use ai_proxy::*;
 pub use book::*;
 pub use book_group::*;
+pub use local_book_data::{export_local_books, import_local_books};
 pub use book_source::login_book_source;
 pub use book_source::*;
 pub use bookmark::{
@@ -31,7 +33,10 @@ pub use rss::{
     read_remote_rss_source_file, read_rss_source_file, save_rss_source, save_rss_sources,
 };
 pub use update::{dismiss_version_update, get_version_update};
-pub use video_download::{convert_video_to_mp4, video_download_status};
+pub use video_download::{
+    convert_video_cancel, convert_video_progress, convert_video_result, convert_video_to_mp4,
+    video_download_status,
+};
 pub use user::{
     add_user, change_password, delete_file, delete_users, get_user_config, get_user_info,
     get_user_list, login, logout, reset_password, save_user_config, update_user, upload_file,

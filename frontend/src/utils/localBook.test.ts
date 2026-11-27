@@ -9,6 +9,7 @@ import {
   parseNameAuthorFromText,
   parseIntroFromText,
   buildStorageFileName,
+  buildVideoFileName,
   parseLocalBookMeta,
 } from './localBook'
 
@@ -104,6 +105,28 @@ describe('buildStorageFileName', () => {
     expect(buildStorageFileName('皇明', '')).toBe('《皇明》.txt')
     expect(buildStorageFileName('', '')).toBe('《本地小说》.txt')
     expect(buildStorageFileName('A/B', '某:某')).toBe('《A_B》 作者：某_某.txt')
+  })
+})
+
+describe('buildVideoFileName', () => {
+  it('书名+章节标题组合，章节序号不再单独成文件名', () => {
+    expect(buildVideoFileName('皇明', '第1集', 'mp4')).toBe('皇明_第1集.mp4')
+    expect(buildVideoFileName('皇明', '1', 'mp4')).toBe('皇明_1.mp4')
+  })
+  it('剥离书名号与非法字符', () => {
+    expect(buildVideoFileName('《皇明》', 'a/b:c', 'mp4')).toBe('皇明_a_b_c.mp4')
+  })
+  it('章节标题已含书名时不重复前缀', () => {
+    expect(buildVideoFileName('皇明', '皇明 第1集', 'mp4')).toBe('皇明_第1集.mp4')
+    expect(buildVideoFileName('皇明', '皇明', 'mp4')).toBe('皇明.mp4')
+  })
+  it('任一为空时退化为另一个，都为空用 video', () => {
+    expect(buildVideoFileName('皇明', '', 'mp4')).toBe('皇明.mp4')
+    expect(buildVideoFileName('', '第3集', 'mkv')).toBe('第3集.mkv')
+    expect(buildVideoFileName('', '', 'mp4')).toBe('video.mp4')
+  })
+  it('扩展名异常时回退 mp4', () => {
+    expect(buildVideoFileName('书', '1', ' mp4;rm')).toBe('书_1.mp4')
   })
 })
 

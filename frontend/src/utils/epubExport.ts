@@ -6,7 +6,7 @@
  * - 图片下载失败时不内嵌，章节 XHTML 保留原远程 <img src> 占位（在线可看）；
  * - 书头（书名/作者/简介）写入 OPF metadata，不插入正文。
  */
-import { zipSync, strToU8, type Zippable } from 'fflate'
+import { zip, strToU8, type Zippable } from 'fflate'
 import { appendAuthQueryParams } from './secureAccess'
 
 export interface ComicChapter {
@@ -21,12 +21,42 @@ export interface ComicEpubParams {
   intro?: string
   chapters: ComicChapter[]
   bookSourceUrl?: string
-  /** 每章下载进度回调 */
+  /** 阶段回调：download=下载图片中，pack=打包中 */
+  onPhase?: (phase: 'download' | 'pack') => void
+  /** 图片下载进度回调：completed 已完成图片数，total 总图片数 */
+  onImageProgress?: (completed: number, total: number) => void
+  /** 每章下载进度回调（保留兼容，图片阶段不再逐章调用） */
   onProgress?: (completed: number, total: number, title: string) => void
   /** 取消标记 */
   signal?: { cancelled: boolean }
   /** 注入的下载函数，默认走 bookSourceProxy（测试可替换） */
   fetchImage?: (url: string) => Promise<Uint8Array>
+}
+
+/** 图片下载并发度：兼顾提速与不压垮书源/代理。 */
+const IMAGE_CONCURRENCY = 6
+
+/**
+ * 带并发上限与取消检查的异步 map，保留结果顺序。
+ * 取消后未开始的任务不再发起，已在途的任务等待其自然结束。
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+  isCancelled: () => boolean,
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (!isCancelled()) {
+      const index = next++
+      if (index >= items.length) break
+      results[index] = await worker(items[index], index)
+    }
+  })
+  await Promise.all(runners)
+  return results
 }
 
 export interface ComicEpubResult {
@@ -117,6 +147,7 @@ export function buildImageProxyUrl(
 export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpubResult> {
   const files: Record<string, Uint8Array> = {}
   const failedImages: string[] = []
+  const failedSet = new Set<string>()
   let totalImages = 0
   let imageSeq = 0
   const spineHtmlFiles: string[] = []
@@ -134,20 +165,62 @@ export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpub
     })
 
   const chapters = params.chapters
-  const total = chapters.length
-  let completed = 0
 
+  // ---- 阶段 1：收集全部图片任务并按 URL 去重，有限并发下载 ----
+  // 先把所有章节的图片 URL 扁平化，便于按图片数汇报统一进度；
+  // 同一 URL 只下载一次（漫画分章常复用同一张图），缓存字节后按顺序写包。
+  const chapterUrls: string[][] = chapters.map((ch) => extractImageUrls(ch.content))
+  const uniqueUrls: string[] = []
+  const urlSet = new Set<string>()
+  for (const urls of chapterUrls) {
+    for (const url of urls) {
+      if (!urlSet.has(url)) {
+        urlSet.add(url)
+        uniqueUrls.push(url)
+      }
+    }
+  }
+  totalImages = uniqueUrls.length
+  const bytesByUrl = new Map<string, Uint8Array>()
+  let downloaded = 0
+
+  params.onPhase?.('download')
+  params.onImageProgress?.(0, totalImages)
+
+  await mapWithConcurrency(
+    uniqueUrls,
+    IMAGE_CONCURRENCY,
+    async (url) => {
+      try {
+        bytesByUrl.set(url, await fetchImage(url))
+      } catch {
+        failedSet.add(url)
+      }
+      downloaded += 1
+      params.onImageProgress?.(downloaded, totalImages)
+    },
+    () => !!params.signal?.cancelled,
+  )
+
+  // 按 URL 首次出现顺序确定失败清单，避免并发完成顺序造成不稳定结果
+  for (const url of uniqueUrls) {
+    if (failedSet.has(url)) failedImages.push(url)
+  }
+
+  // 被取消：返回空字节；调用方依据 signal 决定丢弃
+  if (params.signal?.cancelled) {
+    return { bytes: new Uint8Array(), failedImages, totalImages }
+  }
+
+  // ---- 阶段 2：按章节顺序组装 XHTML，图片字节复用缓存 ----
   for (let ci = 0; ci < chapters.length; ci++) {
-    if (params.signal?.cancelled) break
     const chapter = chapters[ci]
-    const urls = extractImageUrls(chapter.content)
-    totalImages += urls.length
+    const urls = chapterUrls[ci]
     const bodyParts: string[] = []
 
     for (const url of urls) {
-      let imgHtml: string
-      try {
-        const bytes = await fetchImage(url)
+      const bytes = bytesByUrl.get(url)
+      if (bytes) {
         imageSeq += 1
         const ext = imageExt(url)
         const imgName = `${String(imageSeq).padStart(5, '0')}.${ext}`
@@ -157,13 +230,11 @@ export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpub
         imageManifestItems.push(
           `<item id="img${imageSeq}" href="Images/${imgName}" media-type="${mime}" />`,
         )
-        imgHtml = `<div class="page"><img src="../Images/${imgName}" alt="" /></div>`
-      } catch {
-        failedImages.push(url)
+        bodyParts.push(`<div class="page"><img src="../Images/${imgName}" alt="" /></div>`)
+      } else {
         // 失败：保留远程链接占位，在线可看
-        imgHtml = `<div class="page"><img src="${xmlEscape(url)}" alt="" /></div>`
+        bodyParts.push(`<div class="page"><img src="${xmlEscape(url)}" alt="" /></div>`)
       }
-      bodyParts.push(imgHtml)
     }
 
     const htmlName = `ch${String(ci).padStart(4, '0')}.xhtml`
@@ -181,14 +252,7 @@ export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpub
     navItems.push(
       `<li><a href="../Text/${htmlName}">${xmlEscape(chapter.title || `第 ${ci + 1} 章`)}</a></li>`,
     )
-
-    completed += 1
-    params.onProgress?.(completed, total, chapter.title)
-  }
-
-  // 被取消：只返回已处理部分（调用方可据 signal 决定丢弃）
-  if (params.signal?.cancelled) {
-    return { bytes: new Uint8Array(), failedImages, totalImages }
+    params.onProgress?.(ci + 1, chapters.length, chapter.title)
   }
 
   const name = params.name?.trim() || '本地漫画'
@@ -261,6 +325,7 @@ export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpub
   files['OEBPS/toc.ncx'] = strToU8(ncx)
   files['OEBPS/Styles/comic.css'] = strToU8(css)
 
+  params.onPhase?.('pack')
   const zipped = await zipEpub(files)
   return { bytes: zipped, failedImages, totalImages }
 }
@@ -268,14 +333,24 @@ export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpub
 /**
  * 打包为 EPUB：mimetype 必须是首个条目且不压缩（level:0），
  * 其余条目正常压缩。这是通用阅读器识别 EPUB 的硬性要求。
+ *
+ * 用 fflate 的异步 zip（回调式）替代同步 zipSync：压缩几百 MB 漫画图片时
+ * 分批让出主线程，界面不会假死；图片本身已是 JPEG/WebP 高熵数据，
+ * 用 level:0（STORE）打包既不损失可读性、体积几乎不变，又大幅缩短耗时。
  */
 function zipEpub(files: Record<string, Uint8Array>): Promise<Uint8Array> {
-  // zipSync 的逐文件选项：mimetype 用 level:0（STORE），其余 level:6
   const entries: Zippable = {
     mimetype: [strToU8('application/epub+zip'), { level: 0 }],
   }
   for (const [name, data] of Object.entries(files)) {
-    entries[name] = [data, { level: 6 }]
+    // 图片无需再压缩（高熵 + 已压缩格式），STORE 即可；文本仍正常压缩。
+    const isImage = name.startsWith('OEBPS/Images/')
+    entries[name] = [data, { level: isImage ? 0 : 6 }]
   }
-  return Promise.resolve(zipSync(entries))
+  return new Promise((resolve, reject) => {
+    zip(entries, (err, data) => {
+      if (err) reject(err)
+      else resolve(data)
+    })
+  })
 }

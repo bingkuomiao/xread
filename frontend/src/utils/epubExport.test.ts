@@ -168,4 +168,79 @@ describe('buildComicEpub', () => {
     })
     expect(progress).toEqual([1, 2])
   })
+
+  it('图片阶段进度从 0 递增到总数，并先于打包阶段', async () => {
+    const phases: string[] = []
+    const imageProgress: number[] = []
+    await buildComicEpub({
+      name: '测试',
+      author: '',
+      chapters: [
+        { title: '1', content: `${img('https://a/1.jpg')}${img('https://a/2.jpg')}` },
+      ],
+      fetchImage,
+      onPhase: (p) => phases.push(p),
+      onImageProgress: (c) => imageProgress.push(c),
+    })
+    expect(phases).toEqual(['download', 'pack'])
+    expect(imageProgress[0]).toBe(0)
+    expect(imageProgress[imageProgress.length - 1]).toBe(2)
+  })
+
+  it('同一图片 URL 跨章只下载一次', async () => {
+    const countedFetch = vi.fn(async () => new Uint8Array([1]))
+    const result = await buildComicEpub({
+      name: '测试',
+      author: '',
+      chapters: [
+        { title: '1', content: `${img('https://a/same.jpg')}` },
+        { title: '2', content: `${img('https://a/same.jpg')}` },
+      ],
+      fetchImage: countedFetch,
+    })
+    expect(countedFetch).toHaveBeenCalledTimes(1)
+    // 两章各引用一次，包内仍内嵌两张（按章节出现顺序命名）
+    expect(result.totalImages).toBe(1)
+    const files = unzipSync(result.bytes)
+    expect(Object.keys(files).filter((n) => n.startsWith('OEBPS/Images/'))).toHaveLength(2)
+  })
+
+  it('并发下载图片（同时发起超过 1 个请求）', async () => {
+    let inFlight = 0
+    let maxInFlight = 0
+    const urls = Array.from({ length: 8 }, (_, i) => `https://a/${i}.jpg`)
+    const concurrentFetch = vi.fn(async () => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise((r) => setTimeout(r, 5))
+      inFlight -= 1
+      return new Uint8Array([1])
+    })
+    await buildComicEpub({
+      name: '测试',
+      author: '',
+      chapters: [{ title: '1', content: urls.map(img).join('') }],
+      fetchImage: concurrentFetch,
+    })
+    expect(maxInFlight).toBeGreaterThan(1)
+  })
+
+  it('多张图片失败时清单顺序稳定（按 URL 首次出现顺序）', async () => {
+    const failFetch = vi.fn(async (url: string) => {
+      if (url.includes('bad')) throw new Error('fail')
+      return new Uint8Array([1])
+    })
+    const result = await buildComicEpub({
+      name: '测试',
+      author: '',
+      chapters: [
+        {
+          title: '1',
+          content: `${img('https://a/bad1.jpg')}${img('https://a/ok.jpg')}${img('https://a/bad2.jpg')}`,
+        },
+      ],
+      fetchImage: failFetch,
+    })
+    expect(result.failedImages).toEqual(['https://a/bad1.jpg', 'https://a/bad2.jpg'])
+  })
 })

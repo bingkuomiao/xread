@@ -11,8 +11,8 @@ use crate::service::{
     ai_book_service::AiBookService, ai_model_service::AiModelService,
     book_group_service::BookGroupService, book_service::BookService,
     book_source_service::BookSourceService, json_document_service::JsonDocumentService,
-    local_epub_book::LocalEpubBookService, local_txt_book::LocalTxtBookService,
-    update_service::UpdateService, user_service::UserService,
+    local_book_data::LocalBookDataService, local_epub_book::LocalEpubBookService,
+    local_txt_book::LocalTxtBookService, update_service::UpdateService, user_service::UserService,
 };
 use crate::storage::{cache::file_cache::FileCache, db, fs::storage_fs::StorageFs};
 
@@ -45,6 +45,7 @@ pub async fn run() -> anyhow::Result<()> {
     let book_source_service = Arc::new(BookSourceService::new(repo, &cfg.storage_dir));
     let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
     let local_epub_book_service = Arc::new(LocalEpubBookService::new(&cfg.storage_dir));
+    let local_book_data_service = Arc::new(LocalBookDataService::new(&cfg.storage_dir));
     let json_document_service = Arc::new(JsonDocumentService::new(pool.clone(), &cfg.storage_dir));
     let user_service = Arc::new(UserService::new(cfg.clone(), pool.clone()));
     user_service.migrate_legacy_users_from_json().await?;
@@ -68,6 +69,7 @@ pub async fn run() -> anyhow::Result<()> {
         book_group_service,
         local_txt_book_service,
         local_epub_book_service,
+        local_book_data_service,
         json_document_service,
         ai_book_service,
         ai_model_service,
@@ -75,6 +77,18 @@ pub async fn run() -> anyhow::Result<()> {
     };
 
     let app: Router = api::router::build_router(state);
+
+    // 视频转换任务表定时清理：回收已结束任务占用的内存与磁盘临时目录，
+    // 并对异常卡死的任务做超时兜底（cleanup_expired 内部按 10 分钟 TTL 判定）。
+    tokio::spawn(async {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        // 首帧立即 tick，之后每 60 秒一次；用 missed_tick 策略避免补偿式密集执行。
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            crate::service::video_download_task::task_table().cleanup_expired();
+        }
+    });
 
     let addr = SocketAddr::new(cfg.server_host.parse()?, cfg.server_port);
     tracing::info!("listening on {}", addr);

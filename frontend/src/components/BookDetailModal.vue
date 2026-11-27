@@ -31,7 +31,7 @@
               <div class="book-tags">
                 <span v-if="book.kind" class="tag">{{ book.kind }}</span>
                 <span v-if="(book as Book).totalChapterNum" class="tag">共{{ (book as Book).totalChapterNum }}章</span>
-                <span v-if="(book as Book).originName" class="tag origin">{{ (book as Book).originName }}</span>
+                <span v-if="displayOriginName" class="tag origin">{{ displayOriginName }}</span>
               </div>
               <p v-if="(book as Book).durChapterTitle" class="progress">
                 已读至：{{ (book as Book).durChapterTitle }}
@@ -152,6 +152,16 @@ const displayChapters = computed(() => {
 
 // 书籍数据已在入口统一清洗（intro 保留换行），这里直接显示即可。
 const plainIntro = computed(() => props.book?.intro || '')
+
+// 书源名标签去重：本地书的 kind 与 originName 都填成"本地TXT/本地 TXT"，
+// 两个标签几乎一样。规范化（去空白）后相同则不再重复显示书源标签。
+const displayOriginName = computed(() => {
+  const b = props.book as Book
+  const origin = (b?.originName || '').trim()
+  const kind = (props.book?.kind || '').replace(/\s+/g, '')
+  if (origin && kind && kind === origin.replace(/\s+/g, '')) return ''
+  return origin
+})
 
 watch(() => props.modelValue, async (visible) => {
   if (visible && props.book) {
@@ -524,5 +534,16 @@ async function deleteBook() {
 
 .action-btn.danger:hover {
   background: color-mix(in srgb, var(--color-danger, #d93025) 12%, var(--color-bg));
+}
+
+/* 详情弹窗滚动条内嵌：保留滚动能力，但不显示右侧那条竖条（避免"出模"） */
+.detail-modal,
+.chapter-list {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* 旧 Edge / IE */
+}
+.detail-modal::-webkit-scrollbar,
+.chapter-list::-webkit-scrollbar {
+  display: none; /* Chrome / Safari / 新版 Edge */
 }
 </style>

@@ -11,6 +11,11 @@ const { postMock, getMock, searchMock, pickMock } = vi.hoisted(() => ({
 vi.mock('./http', () => ({ default: { post: postMock, get: getMock } }))
 vi.mock('./search', () => ({ searchBookMultiOnce: searchMock }))
 vi.mock('../utils/localBookMatch', () => ({ pickBestMetadata: pickMock }))
+// 隔离封面缓存：这些用例只验证写回安全性，不关心缓存命中
+vi.mock('../utils/localCoverCache', () => ({
+  getCachedCover: vi.fn(() => null),
+  setCachedCover: vi.fn(),
+}))
 
 import { enrichLocalBookMeta, getCoverUrl, saveLocalBookCover } from './bookshelf'
 

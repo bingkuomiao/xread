@@ -118,10 +118,22 @@ export function useCacheTask() {
         chapters: store.chapters.length ? store.chapters : undefined,
         volumeSize,
         signal: exportSignal,
-        onProgress: ({ completed, total, chapterTitle }) => {
-          currentChapterName.value = chapterTitle
-          currentStatus.value = `抓取图片中 (${completed}/${total})`
-          progress.value = total > 0 ? Math.round((completed / total) * 100) : 100
+        onProgress: ({ completed, total, chapterTitle, phase }) => {
+          currentChapterName.value = chapterTitle === '下载图片中' || chapterTitle === '打包中' ? '' : chapterTitle
+          if (phase === 'image') {
+            // 图片阶段是耗时大头：占进度 10%~95%
+            currentStatus.value = total > 0
+              ? `下载图片中 (${completed}/${total})`
+              : '下载图片中...'
+            progress.value = total > 0 ? 10 + Math.round((completed / total) * 85) : 10
+          } else if (phase === 'pack') {
+            currentStatus.value = '正在打包 EPUB...'
+            progress.value = 96
+          } else {
+            // 抓取章节正文：占进度 0%~10%
+            currentStatus.value = `抓取章节正文 (${completed}/${total})`
+            progress.value = total > 0 ? Math.round((completed / total) * 10) : 10
+          }
         },
       })
       if (exportSignal.cancelled) {

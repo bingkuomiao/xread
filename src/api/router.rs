@@ -120,6 +120,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/reader3/uploadTxtBook", post(handlers::upload_txt_book))
         .route("/reader3/exportLocalBook", post(handlers::export_local_book))
+        .route("/reader3/exportLocalBooks", post(handlers::export_local_books))
+        .route("/reader3/importLocalBooks", post(handlers::import_local_books))
         .route("/reader3/uploadEpubBook", post(handlers::upload_epub_book))
         .route("/reader3/saveBook", post(handlers::save_book))
         .route("/reader3/saveBooks", post(handlers::save_books))
@@ -293,6 +295,18 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/reader3/convertVideoToMp4",
             post(handlers::convert_video_to_mp4),
+        )
+        .route(
+            "/reader3/convertVideoProgress",
+            get(handlers::convert_video_progress),
+        )
+        .route(
+            "/reader3/convertVideoResult",
+            get(handlers::convert_video_result),
+        )
+        .route(
+            "/reader3/convertVideoCancel",
+            post(handlers::convert_video_cancel),
         )
         .route(
             "/reader3/videoDownloadStatus",

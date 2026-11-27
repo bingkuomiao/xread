@@ -1087,6 +1087,10 @@ pub async fn delete_book_cache(
     }))))
 }
 
+/// 权威书架读接口：对各前端提供唯一、干净、无副作用的书架数据。
+/// - 数据源为服务端书架文件，经过 URL/展示文本清洗，与其他前端拿到的数据一致。
+/// - 不含任何派生字段（如缓存章节数、目录预取），纯读取。
+/// 其他前端/第三方对接书架请优先使用本接口；需要缓存章节数时用 getShelfBookWithCacheInfo。
 pub async fn get_bookshelf(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -1616,6 +1620,10 @@ pub async fn get_shelf_book(
     )))
 }
 
+/// 书架读接口（带服务端缓存章节数 + 启动期目录预取）。
+/// 目录预取在后台任务中执行（延迟 15s、限流 8 本、间隔 800ms），不阻塞本响应，
+/// 因此本接口对书架数据本身仍是纯读取、无写入副作用。
+/// 本前端历史沿用此接口；其他前端若只需书架请用无副作用的 getBookshelf。
 pub async fn get_shelf_book_with_cache_info(
     State(state): State<AppState>,
     auth: AuthContext,

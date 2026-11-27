@@ -237,6 +237,7 @@
               <ReaderVideoPlayer
                 :url="mediaPlaybackUrl"
                 :title="store.currentChapter?.title || ''"
+                :book-title="store.book?.name || ''"
                 :is-night="store.isNight || appStore.theme === 'dark'"
                 :has-prev="store.currentIndex > 0"
                 :has-next="store.hasNext"

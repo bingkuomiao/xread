@@ -6,7 +6,11 @@ import {
   getBookshelf,
   saveBooks,
   saveBookGroup,
+  exportLocalBooksData,
+  importLocalBooksData,
+  type LocalBookBackupData,
 } from '../api/bookshelf'
+import { isLocalBook } from './localBook'
 import { getReplaceRules, deleteReplaceRules, saveReplaceRules } from '../api/replaceRule'
 import { getRssSources, deleteRssSource, saveRssSources } from '../api/rss'
 import {
@@ -50,6 +54,8 @@ export interface WebdavBackupPayload {
   bookmarks: Bookmark[]
   replaceRules: ReplaceRule[]
   localState: Record<string, string>
+  /** 本地书正文（基础书/章节索引），仅含书架中本地书，恢复时按原 bookUrl 写回。旧备份可能没有此字段。 */
+  localBookData?: LocalBookBackupData[]
 }
 
 export function captureLocalState() {
@@ -83,6 +89,18 @@ export async function createWebdavBackupPayload(): Promise<WebdavBackupPayload> 
     getReplaceRules(),
   ])
 
+  // 本地书正文单独导出：备份不再只含书架元数据，恢复后可打开。
+  // 导出失败不让整个备份失败——退化为仅元数据备份（至少书源/书架能恢复）。
+  const localBookUrls = books.filter(isLocalBook).map((b) => b.bookUrl).filter(Boolean)
+  let localBookData: LocalBookBackupData[] = []
+  if (localBookUrls.length) {
+    try {
+      localBookData = await exportLocalBooksData(localBookUrls)
+    } catch {
+      localBookData = []
+    }
+  }
+
   return {
     version: BACKUP_VERSION,
     createdAt: new Date().toISOString(),
@@ -96,6 +114,7 @@ export async function createWebdavBackupPayload(): Promise<WebdavBackupPayload> 
     bookmarks,
     replaceRules,
     localState: captureLocalState(),
+    localBookData,
   }
 }
 
@@ -124,7 +143,22 @@ export function parseWebdavBackup(raw: string) {
     bookmarks: payload.bookmarks || [],
     replaceRules: payload.replaceRules || [],
     localState: payload.localState || {},
+    localBookData: payload.localBookData || [],
   } as WebdavBackupPayload
+}
+
+/**
+ * 写回本地书正文。恢复/合并都调用：按原 bookUrl 原样落盘，hash 不变，
+ * 恢复后书架里的本地书能直接打开。失败不影响主流程（仅元数据恢复仍可用）。
+ */
+async function restoreLocalBookData(payload: WebdavBackupPayload): Promise<number> {
+  const books = payload.localBookData || []
+  if (!books.length) return 0
+  try {
+    return await importLocalBooksData(books)
+  } catch {
+    return 0
+  }
 }
 
 export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
@@ -171,6 +205,9 @@ export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
     await saveReplaceRules(payload.replaceRules)
   }
 
+  // 最后写回本地书正文（放在书架写入之后，避免被 deleteBooks 清掉）
+  await restoreLocalBookData(payload)
+
   applyLocalState(payload.localState)
 }
 
@@ -213,6 +250,9 @@ export async function mergeWebdavBackup(payload: WebdavBackupPayload) {
   for (const group of payload.bookshelf.groups) await saveBookGroup(group)
   if (payload.bookmarks.length) await saveBookmarks(payload.bookmarks)
   if (payload.replaceRules.length) await saveReplaceRules(payload.replaceRules)
+
+  // 本地书正文按原 bookUrl 写回（合并模式下同样恢复缺失的本地书正文）。
+  await restoreLocalBookData(payload)
 
   // 本地配置合并：备份覆盖同名 key，当前独有 key 保留。
   applyLocalState({ ...captureLocalState(), ...payload.localState })
