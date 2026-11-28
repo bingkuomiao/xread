@@ -134,7 +134,7 @@
             <span>替换</span>
           </button>
 
-          <button class="m-grid-item" :class="{ active: store.activePanel === 'cache' }" @click="store.openPanel('cache', 'settings')">
+          <button class="m-grid-item" :class="{ active: store.activePanel === 'cache' }" @click="store.openPanel('cache')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <ellipse cx="12" cy="5" rx="8" ry="3" />
               <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
@@ -420,10 +420,17 @@ void emit
   color: #f5f5f5;
 }
 
-/* 亮度遮罩 */
+/* 亮度遮罩：
+   必须覆盖整个 layout viewport（--app-height），而不是 inset:0 的 visualViewport。
+   否则移动端浏览器工具栏区域会使 visual 高度小于 layout 高度，底部一段 body 背景
+   露在遮罩之外、未被压暗，表现为正文调暗后底部一条白边。用 --app-height 撑满到
+   屏幕物理底部，让这段与正文一起压暗，白边消失。 */
 .reader-brightness-mask {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: var(--app-height, 100vh);
   z-index: 25;
   pointer-events: none;
   transition: background 0.15s ease;

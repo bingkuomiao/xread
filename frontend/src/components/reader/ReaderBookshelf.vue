@@ -67,6 +67,9 @@ async function openBook(book: Book) {
     readerStore.clear()
     await readerStore.loadBook(book)
     await readerStore.loadChapter(book.durChapterIndex || 0)
+    // 与书架首页打开书籍一致：切换后置顶并写回书架，返回首页排序同步变化。
+    // 放空闲时段执行，不占切书关键路径，也避免用户看着书在抽屉里跳动。
+    store.moveBookToFrontWhenIdle(book.bookUrl, book.origin)
   }
   readerStore.closePanel()
 }

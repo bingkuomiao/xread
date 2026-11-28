@@ -10,6 +10,10 @@
       </button>
     </div>
 
+    <div v-if="isLocalBook(store.book)" class="local-source-tip">
+      本地书籍不支持切换书源；下面的搜索结果仅用于自动匹配封面，点击切换不会生效。
+    </div>
+
     <div class="source-list" ref="listRef">
       <!-- 当前书：与其他卡片共用 ReaderBookCard，仅内容不同 -->
       <ReaderBookCard
@@ -456,6 +460,8 @@ function candidateWordCount(item: CandidateItem) {
 }
 
 onMounted(() => {
+  // 注意：本地书也要正常搜索——搜索结果用于「顺手补封面/共享封面」（maybeFillCoverFromCandidates），
+  // 只在该页禁止「切换书源」动作（见 handleSwitch），不影响补封面能力。
   // 加载书源列表，用于把候选 URL 反查成友好的书源名称
   if (sourceStore.sources.length === 0) {
     void sourceStore.fetchSources().catch(() => undefined)
@@ -688,6 +694,12 @@ function loadMoreSources() {
 
 async function handleSwitch(res: SearchBook) {
   if (store.loading) return
+  // 只禁止「切换书源」这一个动作：本地书的 book_url/origin 一旦被改写成网络书，
+  // 本地文件就再也读不到了。搜索列表照常展示，用于「顺手补封面/共享封面」，不受影响。
+  if (isLocalBook(store.book)) {
+    appStore.showToast('本地书籍不支持切换书源（封面匹配不受影响）', 'warning')
+    return
+  }
   try {
     const nextBook = await store.switchSource(res.bookUrl, res.origin)
     store.closePanel()
@@ -718,6 +730,18 @@ async function handleSwitch(res: SearchBook) {
 .header-left { display: flex; align-items: baseline; gap: 8px; }
 .source-header h3 { font-size: 16px; margin: 0; }
 .source-count { font-size: 11px; opacity: 0.5; }
+
+/* 本地书换源页说明：仅用于补封面、禁止切换，常驻提示避免用户误解点了没反应 */
+.local-source-tip {
+  flex-shrink: 0;
+  margin: 12px 16px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  background: color-mix(in srgb, var(--color-primary, #f43f5e) 8%, transparent);
+  color: var(--color-primary, #f43f5e);
+}
 
 .close-btn {
   width: 32px; height: 32px;

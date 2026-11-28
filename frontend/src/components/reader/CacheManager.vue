@@ -2,10 +2,10 @@
   <div class="cache-manager" :style="{ background: theme.popup, color: theme.fontColor }">
     <div class="cache-header">
       <div>
-        <h3>{{ working && taskKind === 'export' ? '导出章节' : '缓存章节' }}</h3>
+        <h3>{{ showProgress && taskKind === 'export' ? '导出章节' : '缓存章节' }}</h3>
         <p v-if="store.book" class="cache-subtitle">{{ store.book.name }}</p>
       </div>
-      <button class="close-btn" @click="store.backPanel()">
+      <button class="close-btn" @click="handleBack" :title="showProgress ? '返回缓存章节列表' : '返回正文'">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="m15 18-6-6 6-6" />
         </svg>
@@ -26,7 +26,7 @@
         </div>
       </div>
 
-      <div v-if="working" class="caching-status">
+      <div v-if="working && !progressDismissed" class="caching-status">
         <div class="progress-circle">
           <svg viewBox="0 0 36 36">
             <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
@@ -145,7 +145,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useReaderStore } from '../../stores/reader'
 import { isLocalBook } from '../../utils/localBook'
 import { useCacheTask, isComicBookByContent } from '../../composables/useCacheTask'
@@ -167,14 +167,52 @@ const {
   serverCachedCount,
   browserCachedCount,
   refreshStats,
-  startServerCaching,
-  startBrowserCaching,
+  startServerCaching: rawStartServerCaching,
+  startBrowserCaching: rawStartBrowserCaching,
   stopWorking,
   clearServerCache,
   clearBrowserCache,
-  exportWholeBook,
-  exportComicEpub,
+  exportWholeBook: rawExportWholeBook,
+  exportComicEpub: rawExportComicEpub,
 } = useCacheTask()
+
+// 是否展示进度视图。点「返回」时把它置 false 即回到缓存按钮列表——
+// 但后台任务仍在继续（不调用 stopWorking），符合「收回面板进度、缓存照跑」的设计。
+const progressDismissed = ref(false)
+const showProgress = computed(() => working.value && !progressDismissed.value)
+
+function dismissProgress() {
+  progressDismissed.value = true
+}
+
+// 右上角返回：
+// - 正在显示缓存/导出进度时 → 只回到缓存章节列表（不中断任务、不关面板）
+// - 在缓存章节列表时 → 按 backPanel 的 parent 逻辑返回；从控制菜单进入无 parent，直接回正文
+function handleBack() {
+  if (showProgress.value) {
+    dismissProgress()
+    return
+  }
+  store.backPanel()
+}
+
+// 每次真正发起缓存/导出任务时重置进度视图，让新任务的进度重新可见。
+function startServerCaching(count: number) {
+  progressDismissed.value = false
+  rawStartServerCaching(count)
+}
+function startBrowserCaching(count: number) {
+  progressDismissed.value = false
+  rawStartBrowserCaching(count)
+}
+function exportWholeBook() {
+  progressDismissed.value = false
+  rawExportWholeBook()
+}
+function exportComicEpub(volumeSize: number) {
+  progressDismissed.value = false
+  rawExportComicEpub(volumeSize)
+}
 
 // 不再在 onUnmounted 停止缓存——这是「收回面板但缓存继续」的关键。
 // 只在打开面板时刷新一次统计数字。
