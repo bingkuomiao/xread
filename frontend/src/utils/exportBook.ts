@@ -136,6 +136,8 @@ function stripLegacyHeaderLines(text: string, book: Book): string {
 export async function exportBookToLocal(params: {
   book: Book
   chapters?: BookChapter[]
+  /** 预取的首章正文（如漫画探测时已抓），复用避免重复请求 */
+  firstChapterContent?: string
   onProgress?: (progress: ExportProgress) => void
   signal?: { cancelled: boolean }
 }): Promise<{ total: number; completed: number; fileName: string }> {
@@ -169,12 +171,17 @@ export async function exportBookToLocal(params: {
 
   const parts: string[] = []
   let completed = 0
-  for (const chapter of chapters) {
+  for (let ci = 0; ci < chapters.length; ci++) {
     if (params.signal?.cancelled) break
-    const content = await getBookContent({
-      chapterUrl: chapter.url,
-      bookSourceUrl: params.book.origin,
-    })
+    const chapter = chapters[ci]
+    // 首章复用探测阶段已抓的正文，避免同一章请求两次
+    const content = ci === 0 && params.firstChapterContent
+      ? params.firstChapterContent
+      : await getBookContent({
+        chapterUrl: chapter.url,
+        bookUrl: params.book.bookUrl,
+        bookSourceUrl: params.book.origin,
+      })
     // 统一清洗网络书正文：去 HTML/双重转义，并移除开头书头区的分隔线、下载站广告、
     // 以及自带「内容介绍/简介」重复块（书头已输出简介）。正文主体逐字不动。
     const body = cleanExportedBody(content, { dropHeadIntro: true })
@@ -292,6 +299,8 @@ export interface ComicExportResult {
 export async function exportComicEpubToLocal(params: {
   book: Book
   chapters?: BookChapter[]
+  /** 预取的首章正文（如漫画探测时已抓），复用避免重复请求 */
+  firstChapterContent?: string
   volumeSize?: number
   onProgress?: (progress: ExportProgress) => void
   signal?: { cancelled: boolean }
@@ -306,12 +315,17 @@ export async function exportComicEpubToLocal(params: {
   // 先把所有章节正文抓下来（EPUB 打包需要一次性拿到全部图片）
   const comicChapters: ComicChapter[] = []
   let completed = 0
-  for (const chapter of chapters) {
+  for (let ci = 0; ci < chapters.length; ci++) {
     if (params.signal?.cancelled) break
-    const content = await getBookContent({
-      chapterUrl: chapter.url,
-      bookSourceUrl: params.book.origin,
-    })
+    const chapter = chapters[ci]
+    // 首章复用探测阶段已抓的正文，避免同一章请求两次
+    const content = ci === 0 && params.firstChapterContent
+      ? params.firstChapterContent
+      : await getBookContent({
+        chapterUrl: chapter.url,
+        bookUrl: params.book.bookUrl,
+        bookSourceUrl: params.book.origin,
+      })
     comicChapters.push({ title: chapter.title, content })
     completed += 1
     params.onProgress?.({ total: chapters.length, completed, chapterTitle: chapter.title })
@@ -354,8 +368,8 @@ export async function exportComicEpubToLocal(params: {
         params.onProgress?.({ total, completed, chapterTitle: '下载图片中', phase: 'image' })
       },
     })
-    if (params.signal?.cancelled || result.bytes.length === 0) break
-    downloadBytesAsFile(result.bytes, fileName)
+    if (params.signal?.cancelled || result.blob.size === 0) break
+    downloadBlobAsFile(result.blob, fileName)
     files.push(fileName)
     failedImages.push(...result.failedImages)
     totalImages += result.totalImages
@@ -385,16 +399,20 @@ export async function exportOneBookSilently(book: Book): Promise<number> {
 
   let firstContent = ''
   try {
-    firstContent = await getBookContent({ chapterUrl: chapters[0].url, bookSourceUrl: book.origin })
+    firstContent = await getBookContent({
+      chapterUrl: chapters[0].url,
+      bookUrl: book.bookUrl,
+      bookSourceUrl: book.origin,
+    })
   } catch {
     // 首章抓取失败不影响：按小说处理，导出函数内部会再抓一次
   }
 
   if (isComicContent(firstContent)) {
-    const result = await exportComicEpubToLocal({ book, chapters })
+    const result = await exportComicEpubToLocal({ book, chapters, firstChapterContent: firstContent })
     return result.files.length
   }
 
-  const result = await exportBookToLocal({ book, chapters })
+  const result = await exportBookToLocal({ book, chapters, firstChapterContent: firstContent })
   return result.completed > 0 ? 1 : 0
 }

@@ -6,7 +6,7 @@
  * - 图片下载失败时不内嵌，章节 XHTML 保留原远程 <img src> 占位（在线可看）；
  * - 书头（书名/作者/简介）写入 OPF metadata，不插入正文。
  */
-import { zip, strToU8, type Zippable } from 'fflate'
+import { Zip, ZipPassThrough, strToU8 } from 'fflate'
 import { appendAuthQueryParams } from './secureAccess'
 
 export interface ComicChapter {
@@ -60,8 +60,12 @@ async function mapWithConcurrency<T, R>(
 }
 
 export interface ComicEpubResult {
-  /** 最终 zip 字节 */
-  bytes: Uint8Array
+  /**
+   * 最终 EPUB（zip）的 Blob。用 Blob 而非 Uint8Array：fflate 流式输出的分块可直接
+   * 作为 Blob part 收集，避免在内存里再拼出一份完整字节数组（这是大漫画 OOM 的主因）。
+   * 取消时 blob.size === 0。
+   */
+  blob: Blob
   /** 下载失败、以远程链接占位的图片 URL 列表 */
   failedImages: string[]
   totalImages: number
@@ -142,14 +146,14 @@ export function buildImageProxyUrl(
 }
 
 /**
- * 把章节列表打包成标准 EPUB。返回结果字节，不落盘（由调用方触发下载）。
+ * 把章节列表打包成标准 EPUB。返回 Blob，不落盘（由调用方触发下载）。
+ *
+ * 采用流式打包：图片边下载边写入 zip 输出流，不做全量字节缓存，
+ * 峰值内存与图片总量解耦，避免数千张图撑爆标签页导致浏览器崩溃刷新。
  */
 export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpubResult> {
-  const files: Record<string, Uint8Array> = {}
   const failedImages: string[] = []
   const failedSet = new Set<string>()
-  let totalImages = 0
-  let imageSeq = 0
   const spineHtmlFiles: string[] = []
   const navItems: string[] = []
   // 内嵌图片的 manifest 项（XRead EPUB 导入器只收集 manifest 中声明的图片资源）
@@ -166,9 +170,7 @@ export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpub
 
   const chapters = params.chapters
 
-  // ---- 阶段 1：收集全部图片任务并按 URL 去重，有限并发下载 ----
-  // 先把所有章节的图片 URL 扁平化，便于按图片数汇报统一进度；
-  // 同一 URL 只下载一次（漫画分章常复用同一张图），缓存字节后按顺序写包。
+  // ---- 阶段 1：收集图片任务并按 URL 去重，预分配条目顺序 ----
   const chapterUrls: string[][] = chapters.map((ch) => extractImageUrls(ch.content))
   const uniqueUrls: string[] = []
   const urlSet = new Set<string>()
@@ -180,19 +182,65 @@ export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpub
       }
     }
   }
-  totalImages = uniqueUrls.length
-  const bytesByUrl = new Map<string, Uint8Array>()
-  let downloaded = 0
+  const totalImages = uniqueUrls.length
+
+  // 给每张唯一图片预先分配「首次出现顺序」的编号与文件名。图片条目因此在下载前
+  // 就按固定顺序 add 进 zip；下载完成顺序无关（fflate 按 add 顺序输出），既保证
+  // EPUB 内图片顺序稳定，又不必缓存全部图片字节。
+  const urlToName = new Map<string, string>()
+  uniqueUrls.forEach((url, i) => {
+    urlToName.set(url, `${String(i + 1).padStart(5, '0')}.${imageExt(url)}`)
+  })
+
+  // ---- 建立流式 zip：输出分块直接收进 Blob parts，不拼完整字节数组 ----
+  // 关键内存优化：图片字节下载后立即 push 进对应 entry 并释放引用；zip 的每条
+  // 输出（几十 KB）作为 Blob part 收集。峰值内存从「图片总量×2」降到「并发窗口
+  // 几张图 + 文本 + 输出流」，数千张图也不会撑爆标签页。
+  const blobParts: BlobPart[] = []
+  let zipError: unknown = null
+  let resolveZip!: () => void
+  let rejectZip!: (e: unknown) => void
+  const zipDone = new Promise<void>((resolve, reject) => {
+    resolveZip = resolve
+    rejectZip = reject
+  })
+  const zip = new Zip((err, data, final) => {
+    if (err) {
+      zipError = err
+      rejectZip(err)
+      return
+    }
+    if (data && data.length) {
+      // fflate 会复用输出缓冲，必须复制一份再交给 Blob 持有
+      blobParts.push(new Blob([new Uint8Array(data)]))
+    }
+    if (final) resolveZip()
+  })
+
+  // mimetype 必须是第一个条目且不压缩（STORE）
+  const mimetypeEntry = new ZipPassThrough('mimetype')
+  zip.add(mimetypeEntry)
+  mimetypeEntry.push(strToU8('application/epub+zip'), true)
 
   params.onPhase?.('download')
   params.onImageProgress?.(0, totalImages)
 
+  // 并发下载：成功即 add 一个 STORE 条目并立即写入字节，随后释放引用；失败直接跳过
+  // （XHTML 里保留远程链接占位）。图片文件名按 URL 首次出现顺序预分配，因此完成
+  // 顺序虽不定，包内文件名与内容的对应仍稳定；EPUB 靠文件名引用，物理顺序无影响。
+  let downloaded = 0
   await mapWithConcurrency(
     uniqueUrls,
     IMAGE_CONCURRENCY,
     async (url) => {
       try {
-        bytesByUrl.set(url, await fetchImage(url))
+        const bytes = await fetchImage(url)
+        if (!params.signal?.cancelled) {
+          const imgName = urlToName.get(url)!
+          const entry = new ZipPassThrough(`OEBPS/Images/${imgName}`)
+          zip.add(entry)
+          entry.push(bytes, true)
+        }
       } catch {
         failedSet.add(url)
       }
@@ -202,53 +250,56 @@ export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpub
     () => !!params.signal?.cancelled,
   )
 
+  // 被取消：终止 zip，返回空 blob；调用方依据 signal 决定丢弃
+  if (params.signal?.cancelled) {
+    zip.terminate()
+    return { blob: new Blob(), failedImages, totalImages }
+  }
+
   // 按 URL 首次出现顺序确定失败清单，避免并发完成顺序造成不稳定结果
   for (const url of uniqueUrls) {
     if (failedSet.has(url)) failedImages.push(url)
   }
 
-  // 被取消：返回空字节；调用方依据 signal 决定丢弃
-  if (params.signal?.cancelled) {
-    return { bytes: new Uint8Array(), failedImages, totalImages }
-  }
+  // manifest 按唯一图片、以 URL 首次出现顺序生成一次；同一 URL 跨章只留一条。
+  uniqueUrls.forEach((url, i) => {
+    if (failedSet.has(url)) return
+    const imgName = urlToName.get(url)!
+    const ext = imgName.slice(imgName.lastIndexOf('.') + 1)
+    const mime =
+      ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg'
+    imageManifestItems.push(`<item id="img${i + 1}" href="Images/${imgName}" media-type="${mime}" />`)
+  })
 
-  // ---- 阶段 2：按章节顺序组装 XHTML，图片字节复用缓存 ----
+  // ---- 阶段 2：图片字节已全部流入 zip，内存里只剩文本，组装 XHTML/OPF ----
   for (let ci = 0; ci < chapters.length; ci++) {
     const chapter = chapters[ci]
-    const urls = chapterUrls[ci]
     const bodyParts: string[] = []
-
-    for (const url of urls) {
-      const bytes = bytesByUrl.get(url)
-      if (bytes) {
-        imageSeq += 1
-        const ext = imageExt(url)
-        const imgName = `${String(imageSeq).padStart(5, '0')}.${ext}`
-        const imgPath = `OEBPS/Images/${imgName}`
-        files[imgPath] = bytes
-        const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg'
-        imageManifestItems.push(
-          `<item id="img${imageSeq}" href="Images/${imgName}" media-type="${mime}" />`,
-        )
-        bodyParts.push(`<div class="page"><img src="../Images/${imgName}" alt="" /></div>`)
-      } else {
+    for (const url of chapterUrls[ci]) {
+      if (failedSet.has(url)) {
         // 失败：保留远程链接占位，在线可看
         bodyParts.push(`<div class="page"><img src="${xmlEscape(url)}" alt="" /></div>`)
+        continue
       }
+      // 同一 URL 跨章引用同一张包内图片，不重复内嵌
+      const imgName = urlToName.get(url)!
+      bodyParts.push(`<div class="page"><img src="../Images/${imgName}" alt="" /></div>`)
     }
 
     const htmlName = `ch${String(ci).padStart(4, '0')}.xhtml`
     const htmlPath = `OEBPS/Text/${htmlName}`
     spineHtmlFiles.push(htmlPath)
-    files[htmlPath] = strToU8(
+    const xhtml =
       `<?xml version="1.0" encoding="UTF-8"?>\n` +
-        `<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">\n` +
-        `<head><title>${xmlEscape(chapter.title)}</title>` +
-        `<link rel="stylesheet" type="text/css" href="../Styles/comic.css" /></head>\n` +
-        `<body><h1 class="chapter-title">${xmlEscape(chapter.title)}</h1>\n` +
-        bodyParts.join('\n') +
-        `\n</body></html>`,
-    )
+      `<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">\n` +
+      `<head><title>${xmlEscape(chapter.title)}</title>` +
+      `<link rel="stylesheet" type="text/css" href="../Styles/comic.css" /></head>\n` +
+      `<body><h1 class="chapter-title">${xmlEscape(chapter.title)}</h1>\n` +
+      bodyParts.join('\n') +
+      `\n</body></html>`
+    const xhtmlEntry = new ZipPassThrough(htmlPath)
+    zip.add(xhtmlEntry)
+    xhtmlEntry.push(strToU8(xhtml), true)
     navItems.push(
       `<li><a href="../Text/${htmlName}">${xmlEscape(chapter.title || `第 ${ci + 1} 章`)}</a></li>`,
     )
@@ -313,44 +364,33 @@ export async function buildComicEpub(params: ComicEpubParams): Promise<ComicEpub
   const ncx =
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">\n` +
-    `<head><meta name="dtb:uid" content="comic-export" /></head>` +
-    `<docTitle><text>${xmlEscape(name)}</text></docTitle>` +
+    `<head><meta name="dtb:uid" content="comic-export" /></head>\n` +
+    `<docTitle><text>${xmlEscape(name)}</text></docTitle>\n` +
     `<navMap>${ncxPoints}</navMap></ncx>`
 
   const css = `body{margin:0;padding:0;background:#fff;} .chapter-title{font-size:1em;text-align:center;margin:0.5em;} .page{margin:0;padding:0;text-align:center;} .page img{width:100%;height:auto;display:block;margin:0;}`
 
-  files['META-INF/container.xml'] = strToU8(container)
-  files['OEBPS/content.opf'] = strToU8(opf)
-  files['OEBPS/nav.xhtml'] = strToU8(nav)
-  files['OEBPS/toc.ncx'] = strToU8(ncx)
-  files['OEBPS/Styles/comic.css'] = strToU8(css)
+  const textFiles: Array<[string, string]> = [
+    ['META-INF/container.xml', container],
+    ['OEBPS/content.opf', opf],
+    ['OEBPS/nav.xhtml', nav],
+    ['OEBPS/toc.ncx', ncx],
+    ['OEBPS/Styles/comic.css', css],
+  ]
+  for (const [path, text] of textFiles) {
+    const entry = new ZipPassThrough(path)
+    zip.add(entry)
+    entry.push(strToU8(text), true)
+  }
 
   params.onPhase?.('pack')
-  const zipped = await zipEpub(files)
-  return { bytes: zipped, failedImages, totalImages }
-}
+  zip.end()
+  await zipDone
+  if (zipError) throw zipError
 
-/**
- * 打包为 EPUB：mimetype 必须是首个条目且不压缩（level:0），
- * 其余条目正常压缩。这是通用阅读器识别 EPUB 的硬性要求。
- *
- * 用 fflate 的异步 zip（回调式）替代同步 zipSync：压缩几百 MB 漫画图片时
- * 分批让出主线程，界面不会假死；图片本身已是 JPEG/WebP 高熵数据，
- * 用 level:0（STORE）打包既不损失可读性、体积几乎不变，又大幅缩短耗时。
- */
-function zipEpub(files: Record<string, Uint8Array>): Promise<Uint8Array> {
-  const entries: Zippable = {
-    mimetype: [strToU8('application/epub+zip'), { level: 0 }],
+  return {
+    blob: new Blob(blobParts, { type: 'application/epub+zip' }),
+    failedImages,
+    totalImages,
   }
-  for (const [name, data] of Object.entries(files)) {
-    // 图片无需再压缩（高熵 + 已压缩格式），STORE 即可；文本仍正常压缩。
-    const isImage = name.startsWith('OEBPS/Images/')
-    entries[name] = [data, { level: isImage ? 0 : 6 }]
-  }
-  return new Promise((resolve, reject) => {
-    zip(entries, (err, data) => {
-      if (err) reject(err)
-      else resolve(data)
-    })
-  })
 }

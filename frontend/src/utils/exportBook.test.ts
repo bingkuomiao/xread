@@ -198,8 +198,33 @@ describe('exportBookToLocal', () => {
     expect(result.fileName).toBe('《皇明》 作者：雨落见愁.txt')
     expect(progress).toEqual([1, 2])
     expect(getBookContent).toHaveBeenCalledTimes(2)
+    // 导出必须显式传 bookUrl，后端才能用正确 key 命中服务端缓存（不靠反查）
+    expect(getBookContent).toHaveBeenCalledWith({
+      chapterUrl: chapters[0].url,
+      bookUrl: networkBook.bookUrl,
+      bookSourceUrl: networkBook.origin,
+    })
     const exported = blobs[0][1]
     expect(exported).toBe('《皇明》\n作者：雨落见愁\n\n简介：一部历史小说\n\n序章\n\n正文内容一\n\n第一章\n\n正文内容二')
+  })
+
+  it('首章复用预取正文：不再重复请求第一章', async () => {
+    vi.mocked(getBookContent).mockResolvedValueOnce('第二章正文')
+    await exportBookToLocal({
+      book: networkBook,
+      chapters,
+      firstChapterContent: '预取的首章正文',
+    })
+    // 只请求了第 2 章；第 1 章复用了预取内容
+    expect(getBookContent).toHaveBeenCalledTimes(1)
+    expect(getBookContent).toHaveBeenCalledWith({
+      chapterUrl: chapters[1].url,
+      bookUrl: networkBook.bookUrl,
+      bookSourceUrl: networkBook.origin,
+    })
+    const exported = blobs[0][1]
+    expect(exported).toContain('预取的首章正文')
+    expect(exported).toContain('第二章正文')
   })
 
   it('网络书：正文开头已自带同名章节标题时不重复插入', async () => {

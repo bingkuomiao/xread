@@ -11,6 +11,11 @@ import {
 
 const img = (url: string) => `<img src="${url}" />`
 
+/** 把流式打包返回的 Blob 读成字节，供 unzipSync 校验结构。 */
+async function blobBytes(blob: Blob): Promise<Uint8Array> {
+  return new Uint8Array(await blob.arrayBuffer())
+}
+
 describe('extractImageUrls', () => {
   it('按顺序提取 img src，忽略单双引号差异', () => {
     const html = `<p>${img('https://a/1.jpg')}<img src='https://a/2.png'><img alt=x src="https://a/3.webp"></p>`
@@ -85,7 +90,7 @@ describe('buildComicEpub', () => {
 
     expect(result.failedImages).toEqual([])
     expect(result.totalImages).toBe(3)
-    const files = unzipSync(result.bytes)
+    const files = unzipSync(await blobBytes(result.blob))
     const names = Object.keys(files)
 
     // mimetype 首条目且不压缩
@@ -131,7 +136,7 @@ describe('buildComicEpub', () => {
       fetchImage: failFetch,
     })
     expect(result.failedImages).toEqual(['https://a/bad.jpg'])
-    const files = unzipSync(result.bytes)
+    const files = unzipSync(await blobBytes(result.blob))
     const ch0 = strFromU8(files['OEBPS/Text/ch0000.xhtml'])
     expect(ch0).toContain('src="../Images/00001.jpg"')
     expect(ch0).toContain('src="https://a/bad.jpg"')
@@ -151,7 +156,7 @@ describe('buildComicEpub', () => {
       signal,
       fetchImage: cancelFetch,
     })
-    expect(result.bytes.length).toBe(0)
+    expect(result.blob.size).toBe(0)
   })
 
   it('逐章进度回调', async () => {
@@ -199,10 +204,15 @@ describe('buildComicEpub', () => {
       fetchImage: countedFetch,
     })
     expect(countedFetch).toHaveBeenCalledTimes(1)
-    // 两章各引用一次，包内仍内嵌两张（按章节出现顺序命名）
+    // 两章各引用一次，去重后包内只内嵌一张、manifest 也只有一条（避免重复 href）
     expect(result.totalImages).toBe(1)
-    const files = unzipSync(result.bytes)
-    expect(Object.keys(files).filter((n) => n.startsWith('OEBPS/Images/'))).toHaveLength(2)
+    const files = unzipSync(await blobBytes(result.blob))
+    expect(Object.keys(files).filter((n) => n.startsWith('OEBPS/Images/'))).toHaveLength(1)
+    const opf = strFromU8(files['OEBPS/content.opf'])
+    expect((opf.match(/media-type="image\//g) || []).length).toBe(1)
+    // 两章 XHTML 都指向同一张包内图片
+    expect(strFromU8(files['OEBPS/Text/ch0000.xhtml'])).toContain('src="../Images/00001.jpg"')
+    expect(strFromU8(files['OEBPS/Text/ch0001.xhtml'])).toContain('src="../Images/00001.jpg"')
   })
 
   it('并发下载图片（同时发起超过 1 个请求）', async () => {
@@ -242,5 +252,43 @@ describe('buildComicEpub', () => {
       fetchImage: failFetch,
     })
     expect(result.failedImages).toEqual(['https://a/bad1.jpg', 'https://a/bad2.jpg'])
+  })
+
+  it('流式打包：返回合法 EPUB Blob，mimetype 首条目 STORE，大批量乱序完成内容仍正确', async () => {
+    // 模拟 1200 张图（原实现的全量字节缓存 + 一次性 zip 是 OOM 主因），
+    // 且刻意让完成顺序与 add 顺序相反，验证流式 push 的健壮性。
+    const N = 1200
+    const big = new Uint8Array(1024).fill(7)
+    const urls = Array.from({ length: N }, (_, i) => `https://a/${i}.jpg`)
+    let served = 0
+    const reorderFetch = vi.fn(async (_url: string) => {
+      served += 1
+      await new Promise((r) => setTimeout(r, (N - served) % 7)) // 制造乱序完成
+      return big
+    })
+    const result = await buildComicEpub({
+      name: '大漫画',
+      author: '',
+      chapters: [{ title: '1', content: urls.map(img).join('') }],
+      fetchImage: reorderFetch,
+    })
+
+    // 返回的是 Blob 而非完整 Uint8Array，且类型正确
+    expect(result.blob).toBeInstanceOf(Blob)
+    expect(result.blob.type).toBe('application/epub+zip')
+    expect(result.blob.size).toBeGreaterThan(0)
+    expect(result.totalImages).toBe(N)
+    expect(result.failedImages).toEqual([])
+
+    const files = unzipSync(await blobBytes(result.blob))
+    const names = Object.keys(files)
+    expect(names[0]).toBe('mimetype')
+    // mimetype 与图片均为 STORE（本地头第 8 字节 method=0）
+    const raw = await blobBytes(result.blob)
+    const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength)
+    expect(dv.getUint16(8, true)).toBe(0)
+    expect(files['OEBPS/Images/00001.jpg'].length).toBe(1024)
+    expect(files[`OEBPS/Images/${String(N).padStart(5, '0')}.jpg`].length).toBe(1024)
+    expect(Object.keys(files).filter((n) => n.startsWith('OEBPS/Images/'))).toHaveLength(N)
   })
 })
