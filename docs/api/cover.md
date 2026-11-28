@@ -31,7 +31,21 @@ GET /reader3/cover?path=https%3A%2F%2Fimg.example.com%2Fcover.jpg&accessToken=xx
 - 先查本地缓存 `storage/cache/public/cover/{md5(url)}.{ext}`，命中直接返回；
 - 未命中则代下载，带 `User-Agent` / `Referer` 绕过防盗链；番茄图床失效时自动降级公共 CDN；
 - 按**文件魔数**识别真实 content-type（兼容 AVIF/JPEG 与无扩展名 URL）；
+- **AVIF/HEIC 兼容转码**（v1.0.48+8 起）：若真实字节是 AVIF/HEIC（如 `qbnovel.qq.com` 部分封面返回 `image/avif`），后端用内置 ffmpeg 转成 **JPEG** 再返回（响应 `Content-Type: image/jpeg`），并把 JPEG 回写缓存，后续命中零开销。这解决了 KOReader / PW3 等**无 libavif 的客户端无法解码、只能长期占位**的问题。转码失败时降级返回原字节，不影响可用性；
 - 响应头 `Cache-Control: 86400`。
+
+> **Content-Type 透传规则**：`Content-Type` 始终以**真实字节**为准（魔数识别），不是照抄上游响应头——部分站点声明与实际内容不符（如声明 `image/png` 实际是 AVIF）。非 AVIF/HEIC 图片原样透传其真实类型；仅 AVIF/HEIC 会被转成 `image/jpeg`。
+
+### 错误码与鉴权说明
+
+| 场景 | HTTP 状态 | 说明 |
+|------|-----------|------|
+| `path` 为空 | 404 | 缺少必需参数 |
+| 远程封面下载失败 / 上游非 2xx | 404 | 统一返回 NOT_FOUND |
+| 本地 EPUB 资源未登录 | **400** | `AppError::BadRequest("NEED_LOGIN")`，**不是 401** |
+| 本地 EPUB 资源路径非法 | 404 | `bookUrl`/`path` 缺失 |
+
+> 对接注意：鉴权失败走统一 `AppError` → **`400 Bad Request`（body 为 `{isSuccess:false, errorMsg:"NEED_LOGIN"}`）**，不是 `401`。前端/插件不要用 401 判断是否登录，应看响应体 `errorMsg === 'NEED_LOGIN'` 或 HTTP 400。远程封面接口本身走 `public` 命名空间，无需鉴权。
 
 ### `path` 形式二：本地 EPUB 内嵌封面（导入的本地书）
 
@@ -84,14 +98,20 @@ appendAuthQueryParams(params) // 附加 accessToken / secureKey
 return `/reader3/cover?${params.toString()}`
 ```
 
+## 兼容性变更
+
+| 版本 | 变更 |
+|------|------|
+| v1.0.48+8 | 新增 AVIF/HEIC → JPEG 服务端转码（内置 ffmpeg），修复 KOReader/PW3 无法解码 AVIF 封面问题；转码结果回写缓存 |
+| v1.0.48+6 | 封面统一到 `GET /reader3/cover`，`Content-Type` 按文件魔数识别，兼容无扩展名 URL 与 AVIF 字节标注 |
+
 ## 相关源码
 
 | 位置 | 说明 |
 |------|------|
-| `src/api/router.rs:179` | `/reader3/cover` 路由 |
-| `src/api/router.rs:181` | `/reader3/localEpubAsset` 路由 |
-| `src/api/handlers/book.rs:1747` | `get_book_cover` handler |
-| `src/api/handlers/book.rs:1813` | `get_local_epub_asset` handler |
-| `src/service/book_service.rs:1216` | `get_cover` 代下载与缓存 |
+| `src/api/router.rs` | `/reader3/cover`、`/reader3/localEpubAsset` 路由 |
+| `src/api/handlers/book.rs` | `get_book_cover` handler（含转码兜底） |
+| `src/service/book_service.rs` | `get_cover` 代下载与缓存（含转码+回写） |
+| `src/util/image_compat.rs` | 图片兼容模块（ffmpeg 定位、AVIF/HEIC 检测、转 JPEG） |
 | `src/service/local_epub_book.rs` | `get_asset` 本地资源读取 |
-| `frontend/src/api/bookshelf.ts:282` | `getCoverUrl` 前端封装 |
+| `frontend/src/api/bookshelf.ts` | `getCoverUrl` 前端封装 |

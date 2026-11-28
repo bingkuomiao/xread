@@ -40,6 +40,7 @@ export default defineConfig({
           text: 'API参考',
           items: [
             { text: '概述', link: '/api/' },
+            { text: '前端对接指南', link: '/api/INTEGRATION' },
             { text: '书源管理', link: '/api/book-source' },
             { text: '书籍搜索', link: '/api/search' },
             { text: '章节内容', link: '/api/chapter' },
