@@ -3,6 +3,7 @@
 
 # Rust build artifacts
 target/
+target-aarch64/
 
 # Python cache
 __pycache__/
