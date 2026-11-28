@@ -7,9 +7,22 @@ use serde_json::Value;
 use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use tokio::fs;
 
 const TOKEN_TTL_MS: i64 = 7 * 86_400 * 1000;
+/// check_auth 结果缓存有效期。打开书籍时多个接口并发调用 check_auth，短 TTL 即可
+/// 合并这些重复查库；过期后重新查库会刷新会话，7 天滑动窗口不受影响。
+const AUTH_CACHE_TTL_MS: i64 = 30 * 1000;
+
+/// 一条认证缓存：保存认证成功时的 User 快照与其会话过期时刻。
+#[derive(Clone)]
+struct AuthCacheEntry {
+    username: String,
+    user: User,
+    expire_at: i64,
+    cached_at: i64,
+}
 
 #[derive(Clone)]
 pub struct UserService {
@@ -17,6 +30,9 @@ pub struct UserService {
     users_path: PathBuf,
     data_root: PathBuf,
     pool: SqlitePool,
+    /// access_token -> 认证结果。命中且未过期时跳过全部查库/续期。
+    /// 所有会改变用户/会话状态的操作都会主动失效，保证登出/改密/删号/权限变更即时生效。
+    auth_cache: Arc<RwLock<HashMap<String, AuthCacheEntry>>>,
 }
 
 impl UserService {
@@ -28,6 +44,21 @@ impl UserService {
             users_path,
             data_root,
             pool,
+            auth_cache: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// 精确失效某个 token 的认证缓存。
+    fn invalidate_token(&self, access_token: &str) {
+        if let Ok(mut cache) = self.auth_cache.write() {
+            cache.remove(access_token);
+        }
+    }
+
+    /// 按用户名失效该用户所有 token 的认证缓存（改密/删号/权限变更时用）。
+    fn invalidate_user(&self, username: &str) {
+        if let Ok(mut cache) = self.auth_cache.write() {
+            cache.retain(|_, entry| entry.username != username);
         }
     }
 
@@ -131,6 +162,8 @@ impl UserService {
                 .execute(&self.pool)
                 .await?;
         }
+        // 登出即时失效：缓存命中会导致已登出 token 仍被放行
+        self.invalidate_token(access_token);
         Ok(())
     }
 
@@ -242,6 +275,8 @@ impl UserService {
         user.salt = salt;
         user.password = encrypted;
         self.upsert_user_row(&user).await?;
+        // 改密后旧会话应失效，清掉该用户所有缓存条目
+        self.invalidate_user(username);
         Ok(())
     }
 
@@ -279,6 +314,8 @@ impl UserService {
             .await?;
         self.upsert_session(&username, &token, session_expire_at(now))
             .await?;
+        // 密码变更：清掉该用户所有缓存，避免其他 token 的 User 快照含旧密码状态
+        self.invalidate_user(&username);
         Ok(())
     }
 
@@ -308,6 +345,8 @@ impl UserService {
             if user_dir.exists() {
                 let _ = fs::remove_dir_all(user_dir).await;
             }
+            // 删除用户：清掉该用户所有认证缓存，避免已删账号仍被放行
+            self.invalidate_user(u);
         }
         self.get_user_list().await
     }
@@ -333,17 +372,36 @@ impl UserService {
             user.enable_ai_model = v;
         }
         self.upsert_user_row(&user).await?;
+        // 权限开关变更（如关闭 AI）需即时生效，清掉该用户所有认证缓存
+        self.invalidate_user(username);
         self.get_user_list().await
     }
 
     pub async fn check_auth(&self, access_token: &str) -> Result<Option<User>, AppError> {
+        let now = now_ms();
+
+        // 缓存快路径：token 未过期且缓存仍新鲜，直接返回用户快照，零查库。
+        // 打开书籍时章节列表/正文/用户信息等接口并发校验同一 token，命中后省去 7~8 次 SQLite 往返。
+        if let Some(cached) = self
+            .auth_cache
+            .read()
+            .ok()
+            .and_then(|m| m.get(access_token).cloned())
+        {
+            if now < cached.expire_at && now.saturating_sub(cached.cached_at) < AUTH_CACHE_TTL_MS {
+                let mut user = cached.user.clone();
+                // 保持与旧行为一致：每次认证返回当前的 token 与近似实时的登录时间
+                user.last_login_at = now;
+                return Ok(Some(user));
+            }
+        }
+
         self.ensure_admin_user().await?;
         let (username, token) = parse_access_token(access_token)?;
         let mut user = match self.find_user(&username).await? {
             Some(u) => u,
             None => return Ok(None),
         };
-        let now = now_ms();
         self.delete_expired_sessions(&username, now).await?;
         let row = sqlx::query("SELECT expire_at FROM user_sessions WHERE username=?1 AND token=?2")
             .bind(&username)
@@ -367,9 +425,23 @@ impl UserService {
         user.last_login_at = now;
         self.update_user_session_fields(&username, &token, now)
             .await?;
-        self.upsert_session(&username, &token, session_expire_at(now))
+        let new_expire_at = session_expire_at(now);
+        self.upsert_session(&username, &token, new_expire_at)
             .await?;
         user.token_map = Some(self.load_session_map(&username).await?);
+
+        // 写缓存：用续期后的过期时刻，缓存窗口内无需再查库
+        if let Ok(mut cache) = self.auth_cache.write() {
+            cache.insert(
+                access_token.to_string(),
+                AuthCacheEntry {
+                    username: username.clone(),
+                    user: user.clone(),
+                    expire_at: new_expire_at,
+                    cached_at: now,
+                },
+            );
+        }
         Ok(Some(user))
     }
 
@@ -1571,6 +1643,51 @@ mod tests {
             "default"
         );
         std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+
+    #[tokio::test]
+    async fn check_auth_cache_is_invalidated_on_logout() {
+        let (service, temp_dir) = create_user_service().await;
+        let login = service
+            .login("reader1", "password123", false, None)
+            .await
+            .unwrap();
+        let token = login["accessToken"].as_str().unwrap().to_string();
+
+        // 第一次认证查库并写缓存；第二次应命中缓存
+        assert!(service.check_auth(&token).await.unwrap().is_some());
+        assert!(service.check_auth(&token).await.unwrap().is_some());
+
+        // 登出后必须立即失效，即使缓存仍在 TTL 内
+        service.logout(&token).await.unwrap();
+        assert!(service.check_auth(&token).await.unwrap().is_none());
+
+        let _ = fs::remove_dir_all(temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn check_auth_cache_is_invalidated_on_permission_change() {
+        let (service, temp_dir) = create_user_service().await;
+        let login = service
+            .login("reader1", "password123", false, None)
+            .await
+            .unwrap();
+        let token = login["accessToken"].as_str().unwrap().to_string();
+
+        // 先缓存一个 enable_ai_model=false 的用户快照
+        let cached = service.check_auth(&token).await.unwrap().unwrap();
+        assert!(!cached.enable_ai_model);
+
+        // 管理员开启 AI 权限后，旧 token 必须读到新权限（缓存被失效）
+        service
+            .update_user("reader1", None, None, Some(true))
+            .await
+            .unwrap();
+        let fresh = service.check_auth(&token).await.unwrap().unwrap();
+        assert!(fresh.enable_ai_model);
+
+        let _ = fs::remove_dir_all(temp_dir).await;
     }
 
 }

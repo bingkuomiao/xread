@@ -17,11 +17,13 @@ use crate::parser::js::{
 use crate::parser::rule_engine::RuleEngine;
 use crate::storage::cache::file_cache::FileCache;
 use crate::util::hash::md5_hex;
+use crate::util::image_compat::transcode_to_jpeg_if_needed;
 use crate::util::text::{normalize_source_url, repair_encoded_url};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::fs;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration, Instant};
@@ -46,6 +48,10 @@ pub struct BookService {
     storage_dir: PathBuf,
     source_cookies: Arc<RwLock<HashMap<String, String>>>,
     rate_states: Arc<RwLock<HashMap<String, RateState>>>,
+    /// 进程内章节列表缓存：key 为 (user_ns, toc_url)，值为已反序列化的目录 + 文件元数据。
+    /// 打开书籍时 load_chapter_list_cache 命中后免于 read_to_string + serde 反序列化整个目录；
+    /// 目录缓存文件被覆盖/追加/删除时通过元数据变化或显式失效保持同步。
+    chapter_list_cache: Arc<RwLock<HashMap<String, CachedChapterList>>>,
 }
 
 #[derive(Clone, Default)]
@@ -53,6 +59,14 @@ struct RateState {
     in_flight: bool,
     last_start: Option<Instant>,
     window_starts: Vec<Instant>,
+}
+
+/// 章节列表缓存条目：保存已解析的目录 + 文件元数据用于失效检测，Arc 让多次读取共享同一份目录。
+#[derive(Clone)]
+struct CachedChapterList {
+    modified: Option<SystemTime>,
+    len: u64,
+    chapters: Arc<Vec<BookChapter>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -85,6 +99,7 @@ impl BookService {
             storage_dir,
             source_cookies: Arc::new(RwLock::new(initial_cookies)),
             rate_states: Arc::new(RwLock::new(HashMap::new())),
+            chapter_list_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1229,6 +1244,13 @@ impl BookService {
             // 按真实字节识别 content-type：URL 无扩展名的封面（如 QQ qbnovel.qq.com/static/<hex>）
             // 缓存文件被命名为 .png，但实际可能是 AVIF/JPEG，若仍回 image/png 浏览器会解析失败。
             let content_type = content_type_from_bytes(&data).unwrap_or_else(|| content_type_from_ext(&ext));
+            // 兼容 KOReader/PW3：缓存里若是 AVIF/HEIC，转成 JPEG 并回写缓存（首次转换后永久命中）。
+            let cache_path = path.clone();
+            let (data, content_type, converted) =
+                transcode_to_jpeg_if_needed(data, content_type).await;
+            if converted {
+                let _ = fs::write(&cache_path, &data).await;
+            }
             return Ok((data, content_type));
         }
         if let Some(parent) = path.parent() {
@@ -1289,6 +1311,8 @@ impl BookService {
         // 以真实字节为准：部分站点 Content-Type 与内容不符（如 QQ 返回 avif 字节、
         // 无扩展名 URL 兜底成 png），按魔数识别可保证前端 <img> 正确渲染。
         let content_type = content_type_from_bytes(&bytes).unwrap_or(content_type);
+        // 兼容 KOReader/PW3：AVIF/HEIC 先转成 JPEG 再落盘缓存，后续命中直接是 JPEG。
+        let (bytes, content_type, _) = transcode_to_jpeg_if_needed(bytes, content_type).await;
         let _ = fs::write(&path, &bytes).await;
         Ok((bytes, content_type))
     }
@@ -1446,6 +1470,11 @@ impl BookService {
             .join(format!("{}.json", name))
     }
 
+    /// 进程内缓存 key：隔离开不同用户、不同目录，避免串目录。
+    fn chapter_list_mem_key(user_ns: &str, toc_url: &str) -> String {
+        format!("{}::{}", user_ns, toc_url)
+    }
+
     pub async fn load_chapter_list_cache(
         &self,
         user_ns: &str,
@@ -1453,14 +1482,44 @@ impl BookService {
     ) -> Result<Option<Vec<BookChapter>>, AppError> {
         let path = self.chapter_list_cache_path(user_ns, toc_url);
         if !path.exists() {
+            // 文件没了，同步清掉内存缓存，避免残留旧目录。
+            let key = Self::chapter_list_mem_key(user_ns, toc_url);
+            self.chapter_list_cache.write().await.remove(&key);
             return Ok(None);
         }
+
+        let meta = fs::metadata(&path).await.ok();
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+        let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+
+        let key = Self::chapter_list_mem_key(user_ns, toc_url);
+        let cached = self
+            .chapter_list_cache
+            .read()
+            .await
+            .get(&key)
+            .cloned();
+        if let Some(cached) = cached {
+            if cached.modified == modified && cached.len == len {
+                return Ok(Some((*cached.chapters).clone()));
+            }
+        }
+
         let data = fs::read_to_string(&path)
             .await
             .map_err(|e| AppError::Internal(e.into()))?;
         let list: Vec<BookChapter> =
             serde_json::from_str(&data).map_err(|e| AppError::BadRequest(e.to_string()))?;
-        Ok(Some(list))
+        let list = Arc::new(list);
+        self.chapter_list_cache.write().await.insert(
+            key,
+            CachedChapterList {
+                modified,
+                len,
+                chapters: Arc::clone(&list),
+            },
+        );
+        Ok(Some((*list).clone()))
     }
 
     pub async fn save_chapter_list_cache(
@@ -1480,6 +1539,20 @@ impl BookService {
         fs::write(&path, data)
             .await
             .map_err(|e| AppError::Internal(e.into()))?;
+
+        // 写完同步更新内存缓存，写入后 stat 得到新元数据，供后续 load 命中。
+        let meta = fs::metadata(&path).await.ok();
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+        let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let key = Self::chapter_list_mem_key(user_ns, toc_url);
+        self.chapter_list_cache.write().await.insert(
+            key,
+            CachedChapterList {
+                modified,
+                len,
+                chapters: Arc::new(chapters.clone()),
+            },
+        );
         Ok(())
     }
 
@@ -1515,6 +1588,9 @@ impl BookService {
                 .await
                 .map_err(|e| AppError::Internal(e.into()))?;
         }
+        // 删磁盘同时清内存缓存。
+        let key = Self::chapter_list_mem_key(user_ns, toc_url);
+        self.chapter_list_cache.write().await.remove(&key);
         Ok(())
     }
 
@@ -2229,5 +2305,122 @@ mod tests {
         assert_eq!(content_type_from_bytes(&png).as_deref(), Some("image/png"));
         let jpeg = [0xff, 0xd8, 0xff, 0xe0];
         assert_eq!(content_type_from_bytes(&jpeg).as_deref(), Some("image/jpeg"));
+    }
+
+    fn sample_chapters() -> Vec<BookChapter> {
+        vec![
+            BookChapter {
+                title: "第一章".to_string(),
+                url: "http://example.com/1".to_string(),
+                index: 0,
+                tag: None,
+                is_vip: false,
+                is_pay: false,
+                is_volume: false,
+            },
+            BookChapter {
+                title: "第二章".to_string(),
+                url: "http://example.com/2".to_string(),
+                index: 1,
+                tag: None,
+                is_vip: false,
+                is_pay: false,
+                is_volume: false,
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn chapter_list_cache_hits_in_memory_and_invalidates_on_delete() {
+        let storage_dir =
+            std::env::temp_dir().join(format!("reader-rust-chlist-cache-{}", std::process::id()));
+        let service = BookService::new(
+            HttpClient::new(1, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let user_ns = "user-a";
+        let toc = "http://example.com/toc";
+
+        // 首次未命中：磁盘无缓存
+        assert!(service
+            .load_chapter_list_cache(user_ns, toc)
+            .await
+            .unwrap()
+            .is_none());
+
+        // 写入后读盘一次，应进入内存缓存
+        service
+            .save_chapter_list_cache(user_ns, toc, &sample_chapters())
+            .await
+            .unwrap();
+        let first = service
+            .load_chapter_list_cache(user_ns, toc)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[1].title, "第二章");
+        assert_eq!(service.chapter_list_cache.read().await.len(), 1);
+
+        // 篡改磁盘文件但元数据（长度）变化 -> 内存缓存失效，重新读盘拿到新内容
+        let path = service.chapter_list_cache_path(user_ns, toc);
+        let mut modified = sample_chapters();
+        modified.push(BookChapter {
+            title: "第三章".to_string(),
+            url: "http://example.com/3".to_string(),
+            index: 2,
+            tag: None,
+            is_vip: false,
+            is_pay: false,
+            is_volume: false,
+        });
+        let data = serde_json::to_string(&modified).unwrap();
+        tokio::fs::write(&path, data).await.unwrap();
+        let refreshed = service
+            .load_chapter_list_cache(user_ns, toc)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.len(), 3);
+
+        // 删除后磁盘与内存缓存都应清空
+        service
+            .delete_chapter_list_cache(user_ns, toc)
+            .await
+            .unwrap();
+        assert!(service
+            .load_chapter_list_cache(user_ns, toc)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(service.chapter_list_cache.read().await.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+    }
+
+    #[tokio::test]
+    async fn chapter_list_cache_isolated_between_users() {
+        let storage_dir =
+            std::env::temp_dir().join(format!("reader-rust-chlist-isolate-{}", std::process::id()));
+        let service = BookService::new(
+            HttpClient::new(1, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let toc = "http://example.com/same-toc";
+        service
+            .save_chapter_list_cache("user-a", toc, &sample_chapters())
+            .await
+            .unwrap();
+        assert!(service
+            .load_chapter_list_cache("user-b", toc)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(service.chapter_list_cache.read().await.len(), 1);
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
     }
 }

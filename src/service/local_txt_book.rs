@@ -4,7 +4,10 @@ use crate::util::hash::md5_hex;
 use encoding_rs::GB18030;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 use tokio::fs;
 
 pub const LOCAL_TXT_ORIGIN: &str = "local-txt";
@@ -179,16 +182,57 @@ pub fn validate_txt_upload(file_name: &str, byte_len: usize) -> Result<(), AppEr
     Ok(())
 }
 
+/// 全文缓存条目：记录文件元数据用于失效检测，Arc 让各章切片共享同一份全文。
+#[derive(Clone)]
+struct CachedFullText {
+    modified: Option<SystemTime>,
+    len: u64,
+    text: Arc<String>,
+}
+
 #[derive(Clone)]
 pub struct LocalTxtBookService {
     storage_dir: PathBuf,
+    /// 进程内全文缓存：key 为正文文件绝对路径。本地书按字节偏移切片，切章只需同一份全文，
+    /// 避免每读一章都 read_to_string 整本文件。文件被覆盖/删除后元数据变化会自动失效。
+    full_text_cache: Arc<RwLock<HashMap<PathBuf, CachedFullText>>>,
 }
 
 impl LocalTxtBookService {
     pub fn new(storage_dir: impl AsRef<Path>) -> Self {
         Self {
             storage_dir: storage_dir.as_ref().to_path_buf(),
+            full_text_cache: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// 读取正文全文，命中进程内缓存则直接复用，否则读盘并按文件元数据缓存。
+    /// 元数据（修改时间 + 长度）变化视为文件被改写，自动重新读取。
+    async fn read_full_text(&self, path: &Path) -> Result<Arc<String>, AppError> {
+        let meta = fs::metadata(path)
+            .await
+            .map_err(map_local_txt_read_error)?;
+        let modified = meta.modified().ok();
+        let len = meta.len();
+
+        if let Some(cached) = self.full_text_cache.read().ok().and_then(|m| m.get(path).cloned()) {
+            if cached.modified == modified && cached.len == len {
+                return Ok(cached.text);
+            }
+        }
+
+        let text = Arc::new(fs::read_to_string(path).await.map_err(map_local_txt_read_error)?);
+        if let Ok(mut cache) = self.full_text_cache.write() {
+            cache.insert(
+                path.to_path_buf(),
+                CachedFullText {
+                    modified,
+                    len,
+                    text: Arc::clone(&text),
+                },
+            );
+        }
+        Ok(text)
     }
 
     pub async fn import_txt_book(
@@ -344,10 +388,8 @@ impl LocalTxtBookService {
             .clone()
             .unwrap_or_else(|| "book.txt".to_string());
         let path = book_dir.join(&stored_name);
-        let text = fs::read_to_string(&path)
-            .await
-            .map_err(map_local_txt_read_error)?;
-        Ok((text, stored_name))
+        let text = self.read_full_text(&path).await?;
+        Ok((text.as_str().to_string(), stored_name))
     }
 
     pub async fn get_content(&self, user_ns: &str, chapter_url: &str) -> Result<String, AppError> {
@@ -365,9 +407,8 @@ impl LocalTxtBookService {
             .clone()
             .unwrap_or_else(|| "book.txt".to_string());
         let path = book_dir.join(&stored_name);
-        let text = fs::read_to_string(path)
-            .await
-            .map_err(map_local_txt_read_error)?;
+        // 命中进程内全文缓存则零读盘；多章切换/重复打开只实际读一次文件
+        let text = self.read_full_text(&path).await?;
         if chapter.start > chapter.end || chapter.end > text.len() {
             return Err(AppError::BadRequest("章节索引无效".to_string()));
         }
@@ -376,6 +417,10 @@ impl LocalTxtBookService {
 
     pub async fn delete_book_files(&self, user_ns: &str, book_url: &str) -> Result<bool, AppError> {
         let book_dir = self.book_dir(user_ns, book_url)?;
+        // 清理进程内全文缓存中该书目录下的条目，避免删除后仍占用内存
+        if let Ok(mut cache) = self.full_text_cache.write() {
+            cache.retain(|path, _| !path.starts_with(&book_dir));
+        }
         match fs::remove_dir_all(book_dir).await {
             Ok(()) => Ok(true),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),

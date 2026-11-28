@@ -8,6 +8,7 @@ use crate::service::local_epub_book::{
 use crate::service::local_txt_book::{
     is_local_txt_origin, is_local_txt_url, LOCAL_TXT_ORIGIN, MAX_TXT_UPLOAD_BYTES,
 };
+use crate::util::image_compat::transcode_to_jpeg_if_needed;
 use crate::util::text::{normalize_source_url, repair_encoded_url};
 use axum::body::Body;
 use axum::body::Bytes;
@@ -92,6 +93,8 @@ pub struct ChapterListRequest {
 pub struct BookContentRequest {
     #[serde(rename = "chapterUrl", alias = "url", alias = "href")]
     pub chapter_url: Option<String>,
+    #[serde(rename = "bookUrl")]
+    pub book_url: Option<String>,
     #[serde(rename = "bookSourceUrl", alias = "origin")]
     pub book_source_url: Option<String>,
     #[serde(rename = "bookSource")]
@@ -784,6 +787,9 @@ pub async fn get_book_content(
             if req.chapter_url.is_none() {
                 req.chapter_url = v.chapter_url;
             }
+            if req.book_url.is_none() {
+                req.book_url = v.book_url;
+            }
             if req.book_source_url.is_none() {
                 req.book_source_url = v.book_source_url;
             }
@@ -800,6 +806,7 @@ pub async fn get_book_content(
             for (k, v) in url::form_urlencoded::parse(s.as_bytes()) {
                 match k.as_ref() {
                     "chapterUrl" | "href" => req.chapter_url = Some(v.into_owned()),
+                    "bookUrl" => req.book_url = Some(v.into_owned()),
                     "bookSourceUrl" | "origin" => req.book_source_url = Some(v.into_owned()),
                     "index" => req.index = v.parse().ok(),
                     "refresh" => req.refresh = v.parse().ok(),
@@ -921,8 +928,12 @@ pub async fn get_book_content(
             }
             (url.clone(), chapters[idx].url.clone())
         } else {
-            // url is chapterUrl, try to find book_url from shelf
-            let book_url = if let Ok(Some(shelf_book)) = state
+            // url is chapterUrl.
+            // 缓存 key 由 md5(book_url) 决定：优先使用调用方显式传入的 bookUrl（导出/批量场景
+            // 能稳定命中服务端缓存），未传时才从书架反查，反查失败再退回用 chapter url 作 key。
+            let book_url = if let Some(explicit) = req.book_url.clone() {
+                explicit
+            } else if let Ok(Some(shelf_book)) = state
                 .book_service
                 .get_shelf_book_by_chapter(&user_ns, url)
                 .await
@@ -1780,13 +1791,16 @@ pub async fn get_book_cover(
             .local_epub_book_service
             .get_asset(&user_ns, &book_url, &asset_path)
             .await?;
-        let mut resp = Response::new(Body::from(asset.bytes));
+        // 兼容处理：若内嵌封面是 AVIF/HEIC（KOReader/PW3 无法解码），服务端转 JPEG。
+        let (bytes, content_type, _) =
+            transcode_to_jpeg_if_needed(asset.bytes, asset.content_type).await;
+        let mut resp = Response::new(Body::from(bytes));
         let headers = resp.headers_mut();
         headers.insert(
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("private, max-age=3600"),
         );
-        if let Ok(v) = header::HeaderValue::from_str(&asset.content_type) {
+        if let Ok(v) = header::HeaderValue::from_str(&content_type) {
             headers.insert(header::CONTENT_TYPE, v);
         }
         return Ok(resp);
@@ -1795,6 +1809,11 @@ pub async fn get_book_cover(
     // Use "public" namespace for unauthenticated remote cover requests
     match state.book_service.get_cover("public", &url).await {
         Ok((bytes, content_type)) => {
+            // 兼容处理：qbnovel.qq.com 等站点部分封面返回 image/avif，
+            // KOReader/PW3 缺少 libavif 无法解码（只能长期占位）。服务端统一转 JPEG，
+            // 转码失败则降级返回原字节，不影响可用性。
+            let (bytes, content_type, _) =
+                transcode_to_jpeg_if_needed(bytes, content_type).await;
             let mut resp = Response::new(Body::from(bytes));
             let headers = resp.headers_mut();
             headers.insert(
