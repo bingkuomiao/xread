@@ -95,6 +95,7 @@
       @touchstart="handleTouchStart"
       @touchmove="handleTouchMove"
       @touchend="handleTouchEnd"
+      @wheel="handleUserWheel"
       @click="handleGlobalClick"
     >
       <div v-if="store.loading" class="content-loading">
@@ -378,6 +379,7 @@ import Hls from 'hls.js'
 import { parseLrc, type LrcLine } from '../utils/lrcParser'
 import { readMediaProgress, writeMediaProgress, createMediaProgressThrottle } from '../utils/mediaProgress'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
+import { BoundedCache, imageLoadingAttrs } from '../utils/readerPerformance'
 import type { Book } from '../types'
 
 import ReaderMobileControls from '../components/reader/ReaderMobileControls.vue'
@@ -438,6 +440,10 @@ const chapterTextRef = ref<HTMLElement>()
 const showControls = ref(false)
 const showPcSidebars = ref(false)
 
+// 翻页态标志：点击翻页（pageForward/pageBackward/点击跳屏）后置 true，用户手势/滚轮滚动或自动阅读时置 false。
+// 一物两用：① 抑制翻页后的二次吸附（消除晃动）；② 驱动页尾页码仅在「翻页动作」后出现，滚动时隐藏。
+const suppressSnapUntilUserScroll = ref(false)
+
 /** 页尾信息：左章节名 + 右「当前屏/本章总屏」，在滚动/切章时实时更新。 */
 const pageFooter = ref<{ title: string; current: number; total: number }>({ title: '', current: 1, total: 1 })
 /** 仅在普通文本阅读（非媒体/非加载/有正文）时显示页尾。 */
@@ -445,6 +451,8 @@ const showPageFooter = computed(() => {
   if (!config.value.showPageFooter) return false
   if (store.loading || mediaContent.value || isHorizontalPageMode.value) return false
   if (!store.currentChapter) return false
+  // 滚动阅读（手势/滚轮/自动滚动）时隐藏页尾页码，仅在「点击翻页」动作后才显示
+  if (store.isAutoScrolling || !suppressSnapUntilUserScroll.value) return false
   return !!(formattedContent.value || continuousChapters.value.length)
 })
 
@@ -642,8 +650,14 @@ function stripNoiseTextNodes(root: HTMLElement) {
   })
 }
 
-function formatChapterHtml(rawText: string) {
-  if (!rawText) return ''
+// 正文格式化缓存：清洗 + 排版是纯 DOM 操作（创建 wrapper、逐段清洗、拆 <br>、设样式），
+// 对同一章节正文在切字体/缩进/连续阅读重建时会重复执行且结果相同。这里缓存「已清洗+排版、
+// 但未注入鉴权 token / 搜索高亮」的 HTML，命中后只做轻量的后处理，避免重复重建整章 DOM。
+const CHAPTER_HTML_CACHE_LIMIT = 8
+const chapterHtmlCache = new BoundedCache<string>(CHAPTER_HTML_CACHE_LIMIT)
+
+/** 清洗 + 排版（不含鉴权与搜索高亮），结果可安全缓存。 */
+function buildCleanChapterHtml(rawText: string, spacing: number, indent: boolean): string {
   const text = rawText
   const stripLeadingIndent = (line: string) => line.replace(/^[\u3000\u00A0 \t]+/, '')
   const wrapper = document.createElement('div')
@@ -705,8 +719,8 @@ function formatChapterHtml(rawText: string) {
       // 统一设置所有最终段落（含刚拆出的）的间距与缩进
       Array.from(wrapper.querySelectorAll('p')).forEach((p) => {
         p.style.marginTop = '0'
-        p.style.marginBottom = `${config.value.paragraphSpacing}em`
-        p.classList.toggle('reader-indent', config.value.firstLineIndent)
+        p.style.marginBottom = `${spacing}em`
+        p.classList.toggle('reader-indent', indent)
       })
     }
   } else {
@@ -714,16 +728,52 @@ function formatChapterHtml(rawText: string) {
       .split(/\n/)
       .filter((line: string) => line.trim() && !isPaginationNoise(line))
       .map((line: string) => {
-        const shouldIndent = config.value.firstLineIndent
         const content = escapeHtmlText(stripLeadingIndent(line.trimEnd()))
-        return `<p${shouldIndent ? ' class="reader-indent"' : ''} style="margin-top: 0; margin-bottom: ${config.value.paragraphSpacing}em;">${content}</p>`
+        return `<p${indent ? ' class="reader-indent"' : ''} style="margin-top: 0; margin-bottom: ${spacing}em;">${content}</p>`
       })
       .join('')
   }
 
+  return wrapper.innerHTML
+}
+
+/**
+ * 正文格式化入口：清洗+排版结果按 (原文, 段落间距, 首行缩进) 缓存，
+ * 命中后只做轻量的鉴权注入 / 图片懒加载 / 搜索高亮后处理。
+ */
+function formatChapterHtml(rawText: string) {
+  if (!rawText) return ''
+  const spacing = config.value.paragraphSpacing
+  const indent = config.value.firstLineIndent
+  const cacheKey = `${spacing}\u0000${indent ? 1 : 0}\u0000${rawText}`
+  let cleanHtml = chapterHtmlCache.peek(cacheKey)
+  if (cleanHtml === undefined) {
+    cleanHtml = buildCleanChapterHtml(rawText, spacing, indent)
+    chapterHtmlCache.set(cacheKey, cleanHtml)
+  }
+
+  const wrapper = document.createElement('div')
+  wrapper.innerHTML = cleanHtml
   appendLocalEpubAssetAuth(wrapper)
+  applyImageLazyLoading(wrapper)
   highlightSearchText(wrapper)
   return wrapper.innerHTML
+}
+
+/**
+ * 漫画图片懒加载：首张图高优先级立即加载（保证首屏有画面），
+ * 其余图片 loading=lazy + decoding=async，避免首次打开时浏览器一次性向远程书源
+ * 请求整章几十上百张图片阻塞渲染 / 触发 OOM。
+ */
+function applyImageLazyLoading(root: HTMLElement) {
+  const images = Array.from(root.querySelectorAll('img')) as HTMLImageElement[]
+  if (images.length <= 1) return
+  images.forEach((image, index) => {
+    const attrs = imageLoadingAttrs(index)
+    image.setAttribute('loading', attrs.loading)
+    image.setAttribute('decoding', attrs.decoding)
+    if (attrs.fetchpriority) image.setAttribute('fetchpriority', attrs.fetchpriority)
+  })
 }
 
 function appendLocalEpubAssetAuth(root: HTMLElement) {
@@ -1295,6 +1345,8 @@ function snapContinuousScrollToSafeLine() {
   // 自动播放、位置恢复/程序化滚动期间不吸附，避免打架
   if (store.isAutoScrolling || Date.now() < suppressContinuousScrollSyncUntil) return
   if (Date.now() < suppressScrollSnapUntil) return
+  // 点击翻页落点已对齐，等待用户下一次主动滚动前不做二次吸附（消除翻页后晃动）
+  if (suppressSnapUntilUserScroll.value) return
 
   const lineTops = collectLineTops(container)
   if (lineTops.length < 2) return
@@ -1349,15 +1401,17 @@ function snapPageTarget(container: HTMLElement, target: number, direction: 1 | -
   // 章节标题作为分页点：连续模式的 .chapter-title 元素
   const titleEls: HTMLElement[] = Array.from(container.querySelectorAll('.chapter-title'))
 
-  const tolerance = vh * 0.85
   let bestTop: number | null = null
   let bestDist = Infinity
   titleEls.forEach((title) => {
     const top = Math.round(title.getBoundingClientRect().top - cRect.top + curTop)
     if (direction > 0) {
-      // 标题在当前视口下半部或紧随其后（属于「下一屏应该从标题开始」的情况）
+      // 只有标题「当前已可见」（落在当前视口下半部到视口底部之间）时才吸附到它的顶部。
+      // 若标题还在视口下方（top > curTop + vh），吸附就会跳过视口底与标题之间尚未读到的
+      // 章尾正文——表现就是「翻页到章尾丢了至少五行直接进下一章」。此时应正常翻一屏，
+      // 让行边界落点逐屏推进，标题自然进入视野后再于下一页成为页首。
       const lower = curTop + vh * 0.28
-      const upper = curTop + vh + tolerance
+      const upper = curTop + vh
       if (top >= lower && top <= upper) {
         const dist = Math.abs(top - clamped)
         if (dist < bestDist) { bestDist = dist; bestTop = top }
@@ -1389,6 +1443,7 @@ function pageForward() {
   if (mediaContent.value) return
   // 点击翻页落点已经过 snapPageTarget 对齐末行，抑制自由滚动吸附避免二次抖动
   suppressScrollSnapUntil = Date.now() + 500
+  suppressSnapUntilUserScroll.value = true
   if (isHorizontalPageMode.value) {
     const maxPage = Math.max(0, horizontalPages.value.length - 1)
     if (horizontalPageIndex.value >= maxPage) {
@@ -1416,6 +1471,7 @@ function pageBackward() {
   if (mediaContent.value) return
   // 点击翻页落点已经过 snapPageTarget 对齐末行，抑制自由滚动吸附避免二次抖动
   suppressScrollSnapUntil = Date.now() + 500
+  suppressSnapUntilUserScroll.value = true
   if (isHorizontalPageMode.value) {
     if (horizontalPageIndex.value <= 0) {
       prevChapter()
@@ -2016,6 +2072,8 @@ function clickZoneAction(zone: 'prev' | 'menu' | 'next') {
 
   const h = container.clientHeight
   const delta = pageScrollStep(container) // 按整行翻页，避免半行截断与相邻屏重复
+  // 本函数内的落点均经过 snapPageTarget 对齐，压制翻页后的二次吸附
+  suppressSnapUntilUserScroll.value = true
 
   if (config.value.clickAction === 'next') {
     pageForward()
@@ -2085,6 +2143,17 @@ function schedulePageFooterUpdate() {
     updatePageFooter()
   })
 }
+
+// 页尾首次出现 / 章节切换 / 正文就绪时主动刷新一次，避免左侧章节名停留在初始空值
+// （只有滚动事件才更新时，开启开关后的第一帧可能只渲染出右侧页码）。
+watch(
+  [showPageFooter, () => store.currentChapter?.title, () => store.currentIndex],
+  () => {
+    if (!showPageFooter.value) return
+    void nextTick(() => schedulePageFooterUpdate())
+  },
+  { immediate: true },
+)
 
 function handleScroll() {
   hideSelectionMenu()
@@ -2167,8 +2236,15 @@ function handleScroll() {
 function handleTouchStart(_event: TouchEvent) {
   stopAutoScroll()
   hideSelectionMenu()
+  // 用户主动触摸后，恢复自由滑动的末行吸附能力（同时隐藏页尾页码）
+  suppressSnapUntilUserScroll.value = false
   // 小说阅读模式下完全使用原生上下滚动，禁用水平手势与左右翻页滑动，避免移动端乱跳
   touchState.value.moving = false
+}
+
+function handleUserWheel() {
+  // 桌面端滚轮也是用户主动滚动，恢复末行吸附（同时隐藏页尾页码）
+  suppressSnapUntilUserScroll.value = false
 }
 
 function handleTouchMove(_event: TouchEvent) {
@@ -2305,8 +2381,11 @@ function handleStopTTS() {
 
 watch(() => store.isAutoScrolling, (val) => {
   store.autoReading = val
-  if (val) startAutoScroll()
-  else stopAutoScroll()
+  if (val) {
+    // 自动滚动属于滚动阅读，清掉翻页态标志以隐藏页尾页码
+    suppressSnapUntilUserScroll.value = false
+    startAutoScroll()
+  } else stopAutoScroll()
 })
 
 watch(showTTSPanel, (visible) => {

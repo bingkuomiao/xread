@@ -25,6 +25,7 @@ export function useReaderAutoPlayback(
   prevChapter: () => void | Promise<void>,
 ) {
   let autoScrollId: number | null = null
+  let autoScrollSubpixel = 0
   let autoParagraphTimer: number | null = null
   let autoReadingParagraphIndex = -1
   let autoReadingProcessing = false
@@ -317,7 +318,15 @@ export function useReaderAutoPlayback(
     const container = scrollContainerRef.value
     const speed = Math.max(1, config.value.scrollPixel) * (config.value.pageSpeed / 1000) * 0.5
 
-    container.scrollTop += speed
+    // 容器带 CSS scroll-behavior: smooth，逐帧 `scrollTop += 小数` 会触发平滑滚动并被下一帧
+    // 不断打断，宏观上表现为「像素滚动没反应」。改用 instant 立即滚动绕过 CSS 平滑；并累积
+    // 亚像素到 >=1px 再落地，避免小数 scrollTop 在移动端被取整吞掉。
+    autoScrollSubpixel += speed
+    const delta = Math.floor(autoScrollSubpixel)
+    if (delta >= 1) {
+      autoScrollSubpixel -= delta
+      container.scrollTo({ top: container.scrollTop + delta, behavior: 'instant' })
+    }
 
     if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
       if (config.value.clickAction === 'auto' && store.hasNext) {

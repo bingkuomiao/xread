@@ -33,6 +33,29 @@ const SPLIT_BACKTRACK_BREAKERS = new Set(['，', '。', '；', '！', '？', ','
 const PUNCTUATION_ONLY_CHARS = new Set([...NON_STARTING_PUNCTUATION, '“', '‘', '（', '【', '《', '「', '『', '…', '—'])
 const MAX_PUNCTUATION_BACKTRACK = 12
 
+/**
+ * 在最大高度约束下，用二分找到文本前多少个字符能放下。
+ * `fits(count)` 由调用方注入（对应一次 DOM 布局测量），这里只保留纯二分逻辑，
+ * 便于单测；调用方 Ny 需保证 fits 在 [1, totalChars] 上单调（放不下之后只会更放不下）。
+ * 返回 0 表示一个字符都放不下。
+ */
+export function findFittingCharCount(totalChars: number, fits: (count: number) => boolean): number {
+  if (totalChars <= 0) return 0
+  let left = 1
+  let right = totalChars
+  let best = 0
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2)
+    if (fits(mid)) {
+      best = mid
+      left = mid + 1
+    } else {
+      right = mid - 1
+    }
+  }
+  return best
+}
+
 export function useHorizontalPaging(
   store: ReaderStore,
   config: ComputedRef<{ fontSize: number; fontWeight: number; lineHeight: number }>,
@@ -243,8 +266,10 @@ export function useHorizontalPaging(
     measurer.style.left = '-99999px'
     measurer.style.top = '0'
     measurer.style.width = `${innerWidth}px`
-    measurer.style.height = `${pageHeight}px`
-    measurer.style.overflow = 'hidden'
+    // 不固定高度：让内容自然撑开，用一次 scrollHeight 拿到真实内容高度。
+    // 固定 height + overflow:hidden 会让 scrollHeight 在内容未溢出时恒等于容器高度，
+    // 无法得到精确内容高度；同时避免每次测量反复写 style.height。
+    measurer.style.overflow = 'visible'
     measurer.style.visibility = 'hidden'
     measurer.style.pointerEvents = 'none'
     measurer.style.boxSizing = 'border-box'
@@ -260,22 +285,18 @@ export function useHorizontalPaging(
     const pages: string[] = []
     let currentParts: string[] = [titleHtml]
 
+    // 一次 innerHTML 写入 + 一次 scrollHeight 读取即可得到内容真实高度。
+    // 相比遍历每个子元素调 getBoundingClientRect()/getComputedStyle()（每个都是强制布局/样式计算），
+    // 这里把整页测量压成单次布局，是分页提速的关键。
+    // scrollHeight 是浏览器标准的内容高度：最后一个子元素的 margin-bottom 折叠到容器外不计入，
+    // 恰好与原实现「忽略最后一个 p 的 margin-bottom」的语义一致，分页结果不变。
     const measureContentHeight = (parts: string[]) => {
       measurer.innerHTML = parts.join('')
-      const children = Array.from(measurer.children) as HTMLElement[]
-      if (!children.length) return 0
-      const top = measurer.getBoundingClientRect().top
-      return children.reduce((bottom, child, idx) => {
-        const rect = child.getBoundingClientRect()
-        const style = window.getComputedStyle(child)
-        const isLastParagraph = idx === children.length - 1 && child.tagName.toLowerCase() === 'p'
-        const marginBottom = isLastParagraph ? 0 : parseFloat(style.marginBottom) || 0
-        return Math.max(bottom, rect.bottom - top + marginBottom)
-      }, 0)
+      return measurer.scrollHeight
     }
 
     const overflows = (parts: string[]) => {
-      return measureContentHeight(parts) > measurer.clientHeight
+      return measureContentHeight(parts) > pageHeight
     }
 
     const flushPage = () => {
@@ -300,25 +321,24 @@ export function useHorizontalPaging(
 
       const { style, text, className } = parsed
       const currentHeight = measureContentHeight(currentParts)
-      const remainingHeight = measurer.clientHeight - currentHeight
+      const remainingHeight = pageHeight - currentHeight
       const minRemainingHeight = (options.minRemainingLines || 0) * config.value.fontSize * config.value.lineHeight
       if (remainingHeight < minRemainingHeight) return null
 
       const segmentClassName = options.isContinuation ? removeIndentClass(className) : className
-      let left = 1
-      let right = text.length
-      let fitCount = 0
-      while (left <= right) {
-        const mid = Math.floor((left + right) / 2)
-        const tryStyle = buildSegmentStyle(style, options.isContinuation, mid < text.length)
-        const tryHtml = buildParagraphHtml(tryStyle, text.slice(0, mid), segmentClassName)
-        if (!overflows([...currentParts, tryHtml])) {
-          fitCount = mid
-          left = mid + 1
-        } else {
-          right = mid - 1
-        }
+      // 关键优化：整页固定部分只写入一次 DOM，二分期间只改这一个「探针」段落的文本，
+      // 不再每轮 innerHTML 重建整页 + 遍历全部子元素测量。fitting 判断压成纯二分 + 单次 scrollHeight。
+      measurer.innerHTML = `${currentParts.join('')}<p data-fit-probe="1"></p>`
+      const probe = measurer.querySelector('[data-fit-probe]') as HTMLElement | null
+      const fits = (count: number) => {
+        if (!probe) return false
+        const tryStyle = buildSegmentStyle(style, options.isContinuation, count < text.length)
+        probe.setAttribute('style', tryStyle)
+        probe.className = segmentClassName
+        probe.textContent = text.slice(0, count)
+        return measurer.scrollHeight <= pageHeight
       }
+      let fitCount = findFittingCharCount(text.length, fits)
 
       if (fitCount <= 0) return null
 
